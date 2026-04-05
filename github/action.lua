@@ -17,7 +17,7 @@ local function trim(s)
   return (s:gsub('^%s+', ''):gsub('%s+$', ''))
 end
 
-local function hovered_entry() return lc.api.page_get_hovered() end
+local function hovered_entry() return lc.api.get_hovered() end
 
 local function current_keymap()
   return ((config.get() or {}).keymap or {})
@@ -26,6 +26,11 @@ end
 local function repo_path(owner, repo)
   if repo and repo ~= '' then return { 'github', 'repo', owner, repo } end
   return { 'github', 'repo', owner }
+end
+
+local function current_repo_owner()
+  local path = lc.api.get_current_path() or {}
+  if path[2] == 'repo' and path[3] and path[3] ~= '' then return tostring(path[3]) end
 end
 
 local function has_value(value) return value ~= nil and tostring(value) ~= '' end
@@ -56,11 +61,39 @@ local function format_count(value)
   return tostring(count)
 end
 
+local function format_size(bytes)
+  local value = tonumber(bytes)
+  if not value or value < 0 then return nil end
+  if value < 1024 then return string.format('%dB', value) end
+
+  local units = { 'K', 'M', 'G', 'T', 'P' }
+  value = value / 1024
+  for i, unit in ipairs(units) do
+    if value < 1024 or i == #units then
+      if value >= 10 then
+        return string.format('%.0f%s', value, unit)
+      end
+      return string.format('%.1f%s', value, unit)
+    end
+    value = value / 1024
+  end
+end
+
 local function kv(label, value, color)
   return line {
     span(label .. ': ', 'cyan'),
     span(has_value(value) and value or '-', color or 'white'),
   }
+end
+
+local function build_aligned_preview_header(fields, title)
+  if #fields > 1 then lc.style.align_columns(fields) end
+
+  local lines = {}
+  lc.list_extend(lines, fields)
+  table.insert(lines, '')
+  table.insert(lines, line { span(title or '', 'white') })
+  return text(lines)
 end
 
 local function info_lines(title, detail, footer, color)
@@ -86,6 +119,38 @@ local function trim_content_for_preview(content)
   content = tostring(content or '')
   if #content <= max_chars then return content, false end
   return content:sub(1, max_chars), true
+end
+
+local function trim_code_for_preview(content)
+  local max_lines = tonumber(config.get().code_max_lines or 1200) or 1200
+  local max_chars = tonumber(config.get().code_max_chars or 80000) or 80000
+  content = tostring(content or '')
+  local truncated = false
+
+  if max_lines > 0 then
+    local newline_count = 0
+    for pos in content:gmatch '()\n' do
+      newline_count = newline_count + 1
+      if newline_count >= max_lines then
+        content = content:sub(1, pos - 1)
+        truncated = true
+        break
+      end
+    end
+  end
+
+  if #content > max_chars then
+    content = content:sub(1, max_chars)
+    truncated = true
+  end
+
+  return content, truncated
+end
+
+local function detect_language_from_name(name)
+  name = tostring(name or ''):lower()
+  if name == 'dockerfile' then return 'dockerfile' end
+  return name:match '%.([^.]+)$'
 end
 
 function M.open_user_input()
@@ -121,6 +186,68 @@ end
 
 function M.search_repo_input() M.open_search_input 'repo' end
 function M.search_user_input() M.open_search_input 'user' end
+
+function M.search_current_user_repos_input(entry_or_username)
+  local username
+
+  if type(entry_or_username) == 'string' then
+    username = trim(entry_or_username)
+  elseif type(entry_or_username) == 'table' then
+    username = trim(entry_or_username.username or entry_or_username.owner or entry_or_username.login or '')
+  else
+    username = trim(current_repo_owner() or '')
+  end
+
+  if username == '' then
+    lc.notify 'Repository owner is unavailable'
+    return
+  end
+
+  lc.input {
+    prompt = 'Search ' .. username .. ' repositories',
+    placeholder = 'repo name / keywords',
+    on_submit = function(input)
+      local query = trim(input)
+      if query == '' then
+        lc.notify 'Search query is required'
+        return
+      end
+
+      lc.api.go_to { 'github', 'search', 'repo', 'user:' .. username .. ' ' .. query }
+    end,
+  }
+end
+
+local function current_repo_ref()
+  local path = lc.api.get_current_path() or {}
+  if path[2] ~= 'repo' or not path[3] or not path[4] then return nil, nil end
+  return tostring(path[3]), tostring(path[4])
+end
+
+local function open_repo_item_search(kind)
+  local owner, repo = current_repo_ref()
+  if not has_value(owner) or not has_value(repo) then
+    lc.notify 'Repository path is unavailable'
+    return
+  end
+
+  local label = kind == 'pulls' and 'pull requests' or 'issues'
+  lc.input {
+    prompt = string.format('Search %s/%s %s', owner, repo, label),
+    placeholder = 'query',
+    on_submit = function(input)
+      local query = trim(input)
+      if query == '' then
+        lc.api.go_to { 'github', 'repo', owner, repo, kind }
+        return
+      end
+      lc.api.go_to { 'github', 'repo', owner, repo, kind, 'search', query }
+    end,
+  }
+end
+
+function M.search_repo_issues_input() open_repo_item_search 'issues' end
+function M.search_repo_pulls_input() open_repo_item_search 'pulls' end
 
 function M.go_to_user(entry)
   entry = entry or hovered_entry()
@@ -248,10 +375,13 @@ function M.repo_preview(entry, cb)
     local limit = math.min(#items, 5)
     for i = 1, limit do
       local item = items[i]
-      table.insert(result, {
-        name = item.name,
-        percent = string.format('%.1f%%', item.percent_value),
-      })
+      local percent = string.format('%.1f%%', item.percent_value)
+      if percent ~= '0.0%' then
+        table.insert(result, {
+          name = item.name,
+          percent = percent,
+        })
+      end
     end
     return result
   end
@@ -271,15 +401,14 @@ function M.repo_preview(entry, cb)
   end
   entry.language_stats_loading = true
 
-  api.get_repo_languages(owner, repo_name, function(data, err)
+  api.get_repo_languages(owner, repo_name):next(function(data)
     entry.language_stats_loading = false
-    if err then
-      entry.language_stats = {}
-      if cb then cb(render_preview()) end
-      return
-    end
     entry.language_stats = build_language_stats(data)
     if cb then cb(render_preview(entry.language_stats)) end
+  end, function()
+    entry.language_stats_loading = false
+    entry.language_stats = {}
+    if cb then cb(render_preview()) end
   end)
 
   if not cb then return render_preview() end
@@ -316,12 +445,7 @@ function M.readme_preview(entry, cb)
 
   cb(info_lines('README', 'Loading README from GitHub...', '', 'cyan'))
 
-  api.get_repo_readme(entry.owner, entry.repo_name, function(content, err)
-    if err then
-      cb(info_lines('README', err, '', 'red'))
-      return
-    end
-
+  api.get_repo_readme(entry.owner, entry.repo_name):next(function(content)
     if trim(content) == '' then
       cb(info_lines('README', 'This repository does not expose a README through the GitHub API.', '', 'darkgray'))
       return
@@ -335,6 +459,8 @@ function M.readme_preview(entry, cb)
     end
 
     cb(rendered)
+  end, function(err)
+    cb(info_lines('README', err, '', 'red'))
   end)
 end
 
@@ -346,6 +472,127 @@ function M.search_prompt_preview(entry)
     '',
     line { span('Open this entry to input a query.', 'white') },
     line { span('Shortcut: ' .. tostring(keymap.search or 's'), 'darkgray') },
+  }
+end
+
+function M.repo_ref_preview(entry)
+  local ref = entry.ref or {}
+  local commit = ref.commit or {}
+  local label = entry.ref_kind == 'branches' and 'Branch' or 'Tag'
+  return text {
+    kv(label, entry.ref_name or entry.key, entry.ref_kind == 'branches' and 'green' or 'cyan'),
+    kv('Commit', commit.sha or entry.ref_target or '-', 'yellow'),
+    '',
+    line { span('Press Enter/Right to browse repository code at this ref.', 'darkgray') },
+  }
+end
+
+function M.repo_content_preview(entry, cb)
+  local item = entry.item or {}
+  local item_type = tostring(item.type or '')
+
+  if item_type ~= 'file' then
+    return text {
+      kv('Path', entry.item_path or item.path or entry.key, 'yellow'),
+      kv('Type', item_type ~= '' and item_type or 'dir', 'cyan'),
+      kv('Ref', entry.ref_name or '-', 'green'),
+      '',
+      line { span('Press Enter/Right to open this directory.', 'darkgray') },
+    }
+  end
+
+  local function render_file(content)
+    local clipped, truncated = trim_code_for_preview(content or '')
+    local language = detect_language_from_name(item.name or entry.item_path) or 'text'
+    local rendered = lc.style.highlight(clipped, language)
+    if truncated then
+      rendered:append ''
+      rendered:append(line { span('[truncated]', 'yellow') })
+    end
+    return rendered
+  end
+
+  if type(item.decoded_content) == 'string' and item.decoded_content ~= '' then
+    local preview = render_file(item.decoded_content)
+    if cb then
+      cb(preview)
+      return
+    end
+    return preview
+  end
+
+  if cb then cb(info_lines('Code', 'Loading file content from GitHub...', '', 'cyan')) end
+  api.get_repo_contents(entry.owner, entry.repo_name, entry.ref_name, entry.item_path):next(function(data)
+    entry.item = data or entry.item
+    local content = data and data.decoded_content or ''
+    if content == '' then
+      if cb then cb(info_lines('Code', 'This file does not expose decodable text content.', '', 'darkgray')) end
+      return
+    end
+    if cb then cb(render_file(content)) end
+  end, function(err)
+    if cb then cb(info_lines('Code', err, '', 'red')) end
+  end)
+
+  if not cb then
+    return info_lines('Code', 'Loading file content from GitHub...', '', 'cyan')
+  end
+end
+
+function M.issue_preview(entry)
+  local issue = entry.issue or {}
+  local header = build_aligned_preview_header({
+    kv('Issue', '#' .. tostring(issue.number or '?'), 'yellow'),
+    kv('State', issue.state or 'open', (issue.state or 'open') == 'open' and 'green' or 'darkgray'),
+    kv('Author', issue.user and issue.user.login, 'cyan'),
+    kv('Comments', tostring(issue.comments or 0), 'blue'),
+    kv('Created', format_date_only(issue.created_at), 'white'),
+    kv('Updated', format_date_only(issue.updated_at), 'white'),
+  }, issue.title or 'Issue')
+
+  if issue.body and issue.body ~= '' then
+    return text {
+      header,
+      '',
+      lc.style.highlight(issue.body, 'markdown'),
+    }
+  end
+
+  return text {
+    header,
+    '',
+    line { span('No description', 'darkgray') },
+  }
+end
+
+function M.pull_preview(entry)
+  local pr = entry.pull or {}
+  local merged = pr.merged_at ~= nil
+  local state_label = merged and 'merged' or (pr.state or 'open')
+  local state_color = merged and 'magenta' or ((pr.state or 'open') == 'open' and 'green' or 'darkgray')
+
+  local header = build_aligned_preview_header({
+    kv('Pull', '#' .. tostring(pr.number or '?'), 'magenta'),
+    kv('State', state_label, state_color),
+    kv('Author', pr.user and pr.user.login, 'cyan'),
+    kv('Comments', tostring(pr.comments or 0), 'blue'),
+    kv('Draft', bool_text(pr.draft == true), pr.draft and 'yellow' or 'darkgray'),
+    kv('Created', format_date_only(pr.created_at), 'white'),
+    kv('Updated', format_date_only(pr.updated_at), 'white'),
+  }, pr.title or 'Pull request')
+
+  if pr.body and pr.body ~= '' then
+    return text {
+      header,
+      '',
+      lc.style.highlight(pr.body, 'markdown'),
+    }
+  end
+
+  return text {
+    header,
+    '',
+    line { span('No description', 'darkgray') },
   }
 end
 
