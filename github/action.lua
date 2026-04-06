@@ -49,6 +49,18 @@ local function format_date_only(value)
   return formatted
 end
 
+local function format_datetime(value)
+  value = tostring(value or '')
+  if value == '' then return '-' end
+
+  local ok, parsed = pcall(lc.time.parse, value)
+  if not ok then return value end
+
+  local ok_format, formatted = pcall(lc.time.format, parsed, '%Y-%m-%d %H:%M')
+  if not ok_format then return value end
+  return formatted
+end
+
 local function format_count(value)
   local count = tonumber(value or 0) or 0
   if count >= 1000 then
@@ -249,6 +261,29 @@ end
 function M.search_repo_issues_input() open_repo_item_search 'issues' end
 function M.search_repo_pulls_input() open_repo_item_search 'pulls' end
 
+local function open_repo_item_state_filter(kind)
+  local owner, repo = current_repo_ref()
+  if not has_value(owner) or not has_value(repo) then
+    lc.notify 'Repository path is unavailable'
+    return
+  end
+
+  local label = kind == 'pulls' and 'pull requests' or 'issues'
+  lc.select({
+    prompt = string.format('Filter %s/%s %s by state', owner, repo, label),
+    options = {
+      { value = 'open', display = line { span('Open', 'red') } },
+      { value = 'closed', display = line { span('Closed', 'magenta') } },
+    },
+  }, function(choice)
+    if not choice or choice == '' then return end
+    lc.api.go_to { 'github', 'repo', owner, repo, kind, tostring(choice) }
+  end)
+end
+
+function M.filter_repo_issues_state_input() open_repo_item_state_filter 'issues' end
+function M.filter_repo_pulls_state_input() open_repo_item_state_filter 'pulls' end
+
 function M.go_to_user(entry)
   entry = entry or hovered_entry()
   local username = entry and (entry.username or entry.login or (entry.user and entry.user.login))
@@ -420,10 +455,11 @@ function M.notification_preview(entry)
   local repository = notif.repository or {}
   return text {
     kv('Repo', repository.full_name or entry.repo_full_name, 'green'),
-    kv('Type', subject.type, 'yellow'),
+    kv('Type', entry.notification_target_kind or subject.type, 'yellow'),
     kv('Reason', notif.reason, 'blue'),
     kv('Unread', bool_text(notif.unread ~= false), notif.unread ~= false and 'yellow' or 'darkgray'),
-    kv('Updated', notif.updated_at, 'white'),
+    kv('Updated', format_datetime(notif.updated_at), 'white'),
+    kv('Open', entry.html_url, 'darkgray'),
     '',
     line { span(subject.title or 'No title', 'white') },
   }
@@ -543,11 +579,11 @@ function M.issue_preview(entry)
   local issue = entry.issue or {}
   local header = build_aligned_preview_header({
     kv('Issue', '#' .. tostring(issue.number or '?'), 'yellow'),
-    kv('State', issue.state or 'open', (issue.state or 'open') == 'open' and 'green' or 'darkgray'),
+    kv('State', issue.state or 'open', (issue.state or 'open') == 'open' and 'red' or 'magenta'),
     kv('Author', issue.user and issue.user.login, 'cyan'),
     kv('Comments', tostring(issue.comments or 0), 'blue'),
-    kv('Created', format_date_only(issue.created_at), 'white'),
-    kv('Updated', format_date_only(issue.updated_at), 'white'),
+    kv('Created', format_datetime(issue.created_at), 'white'),
+    kv('Updated', format_datetime(issue.updated_at), 'white'),
   }, issue.title or 'Issue')
 
   if issue.body and issue.body ~= '' then
@@ -569,7 +605,7 @@ function M.pull_preview(entry)
   local pr = entry.pull or {}
   local merged = pr.merged_at ~= nil
   local state_label = merged and 'merged' or (pr.state or 'open')
-  local state_color = merged and 'magenta' or ((pr.state or 'open') == 'open' and 'green' or 'darkgray')
+  local state_color = merged and 'magenta' or ((pr.state or 'open') == 'open' and 'red' or 'magenta')
 
   local header = build_aligned_preview_header({
     kv('Pull', '#' .. tostring(pr.number or '?'), 'magenta'),
@@ -577,8 +613,8 @@ function M.pull_preview(entry)
     kv('Author', pr.user and pr.user.login, 'cyan'),
     kv('Comments', tostring(pr.comments or 0), 'blue'),
     kv('Draft', bool_text(pr.draft == true), pr.draft and 'yellow' or 'darkgray'),
-    kv('Created', format_date_only(pr.created_at), 'white'),
-    kv('Updated', format_date_only(pr.updated_at), 'white'),
+    kv('Created', format_datetime(pr.created_at), 'white'),
+    kv('Updated', format_datetime(pr.updated_at), 'white'),
   }, pr.title or 'Pull request')
 
   if pr.body and pr.body ~= '' then
@@ -593,6 +629,76 @@ function M.pull_preview(entry)
     header,
     '',
     line { span('No description', 'darkgray') },
+  }
+end
+
+function M.discussion_preview(entry)
+  local discussion = entry.discussion or {}
+  local state_label = discussion.closed and 'closed' or (discussion.is_answered and 'answered' or 'open')
+  local state_color = discussion.closed and 'magenta' or (discussion.is_answered and 'green' or 'cyan')
+  local category = ((discussion.category or {}).name)
+
+  local header = build_aligned_preview_header({
+    kv('Discussion', '#' .. tostring(discussion.number or '?'), 'cyan'),
+    kv('State', state_label, state_color),
+    kv('Author', discussion.user and discussion.user.login, 'cyan'),
+    kv('Category', category, 'yellow'),
+    kv('Comments', tostring(discussion.comments or 0), 'blue'),
+    kv('Created', format_datetime(discussion.created_at), 'white'),
+    kv('Updated', format_datetime(discussion.updated_at), 'white'),
+  }, discussion.title or 'Discussion')
+
+  if discussion.body and discussion.body ~= '' then
+    return text {
+      header,
+      '',
+      lc.style.highlight(discussion.body, 'markdown'),
+    }
+  end
+
+  return text {
+    header,
+    '',
+    line { span('No description', 'darkgray') },
+  }
+end
+
+function M.comment_preview(entry)
+  local comment = entry.comment or {}
+  local author = ((comment.user or {}).login) or ((comment.author or {}).login) or '-'
+  local detail = entry.kind == 'pull_review' and 'Review'
+    or (entry.kind == 'pull_review_comment' and 'Review comment' or 'Comment')
+  local created = comment.created_at or comment.submitted_at or comment.updated_at
+  local path = comment.path or '-'
+  local body = trim(comment.body or comment.body_text or '')
+
+  local header = build_aligned_preview_header({
+    kv('Kind', detail, 'yellow'),
+    kv('Author', author, 'cyan'),
+    kv('Created', format_datetime(created), 'white'),
+    kv('Path', path, 'green'),
+  }, detail)
+
+  if body ~= '' then
+    return text {
+      header,
+      '',
+      lc.style.highlight(body, 'markdown'),
+    }
+  end
+
+  if comment.diff_hunk and comment.diff_hunk ~= '' then
+    return text {
+      header,
+      '',
+      lc.style.highlight(comment.diff_hunk, 'diff'),
+    }
+  end
+
+  return text {
+    header,
+    '',
+    line { span('No content', 'darkgray') },
   }
 end
 

@@ -96,7 +96,7 @@ local function decorate_repo_browser_entries(items)
   return out
 end
 
-local function decorate_repo_item_search_keymap(path, items)
+local function decorate_repo_item_page_keymap(path, items)
   path = path or {}
   items = items or {}
 
@@ -104,25 +104,32 @@ local function decorate_repo_item_search_keymap(path, items)
 
   local plugin_keymap = config.get().keymap or {}
   local search_key = plugin_keymap.search
-  if not search_key or search_key == '' then return end
+  local filter_key = plugin_keymap.filter_state
 
   local callback
   local desc
+  local filter_callback
+  local filter_desc = 'filter by state'
 
   if path[5] == 'issues' then
     callback = action.search_repo_issues_input
     desc = 'search issues'
+    filter_callback = action.filter_repo_issues_state_input
   elseif path[5] == 'pulls' then
     callback = action.search_repo_pulls_input
     desc = 'search pull requests'
+    filter_callback = action.filter_repo_pulls_state_input
   else
     return
   end
 
   for _, entry in ipairs(items) do
     entry.keymap = entry.keymap or {}
-    if entry.keymap[search_key] == nil then
+    if search_key and search_key ~= '' and entry.keymap[search_key] == nil then
       entry.keymap[search_key] = { callback = callback, desc = desc }
+    end
+    if filter_key and filter_key ~= '' and filter_callback and entry.keymap[filter_key] == nil then
+      entry.keymap[filter_key] = { callback = filter_callback, desc = filter_desc }
     end
   end
 end
@@ -149,7 +156,7 @@ local function materialize_pagination(state)
     table.insert(items, state.empty_entry())
   end
 
-  decorate_repo_item_search_keymap(state.path, items)
+  decorate_repo_item_page_keymap(state.path, items)
   entries.align_repo_entry_columns(items)
   return items
 end
@@ -244,9 +251,13 @@ local function list_root(_, cb)
   local authed = api.is_authenticated()
 
   cb {
-    entries.route_entry('notifications', 'Unread notifications', authed and 'Requires token, paginated.' or 'Requires token.', 'yellow', {
+    entries.route_entry('notifications', 'Notifications', authed and 'Read and unread, paginated.' or 'Requires token.', 'yellow', {
       label = 'Notifications',
       icon = '󰜘',
+    }),
+    entries.route_entry('trending', 'Browse trending repositories', 'Today, this week, and this month.', 'magenta', {
+      label = 'Trending',
+      icon = '',
     }),
     entries.route_entry(
       'repo',
@@ -296,6 +307,77 @@ local function list_notifications(path, cb)
       return entries.info_entry('empty', 'No notifications', 'GitHub returned an empty list.', 'darkgray')
     end,
   })
+end
+
+local function list_trending_root(_, cb)
+  local plugin_keymap = config.get().keymap or {}
+
+  local function period_entry(key, label, detail, color)
+    local path = { 'github', 'trending', key }
+    return {
+      key = key,
+      kind = 'route',
+      title = label,
+      detail = detail,
+      color = color,
+      display = lc.style.line {
+        lc.style.span(' ', color),
+        lc.style.span(label, color),
+      },
+      keymap = {
+        [plugin_keymap.open] = { callback = function() action.go_to_path(path) end, desc = 'open' },
+        [plugin_keymap.enter] = { callback = function() action.go_to_path(path) end, desc = 'open' },
+      },
+      preview = action.route_preview,
+    }
+  end
+
+  cb {
+    period_entry('daily', 'Today', 'Trending repositories today.', 'green'),
+    period_entry('weekly', 'This week', 'Trending repositories this week.', 'yellow'),
+    period_entry('monthly', 'This month', 'Trending repositories this month.', 'magenta'),
+  }
+end
+
+local function list_trending_period(path, cb)
+  local period = tostring(path[3] or 'daily')
+  local title_map = {
+    daily = 'today',
+    weekly = 'this week',
+    monthly = 'this month',
+  }
+
+  cb {
+    entries.info_entry('loading', 'Loading trending', 'Fetching github.com/trending (' .. period .. ') ...', 'cyan'),
+  }
+
+  api.list_trending(period):next(function(items)
+    local mapped = {}
+    for _, item in ipairs(items or {}) do
+      table.insert(mapped, entries.trending_repo_entry(item))
+    end
+
+    if #mapped == 0 then
+      mapped = {
+        entries.info_entry(
+          'empty',
+          'No trending repositories',
+          'GitHub returned an empty list for ' .. (title_map[period] or period) .. '.',
+          'darkgray'
+        ),
+      }
+    else
+      entries.align_repo_entry_columns(mapped)
+    end
+
+    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+  end, function(err)
+    if current_path_equals(path) then
+      lc.api.set_entries(nil, {
+        entries.info_entry('error', 'GitHub request failed', err, 'red'),
+      })
+    end
+  end)
 end
 
 local function list_repo_root(path, cb)
@@ -412,6 +494,7 @@ local function list_repo_detail(path, cb)
     entries.readme_entry(owner, repo_name),
     entries.repo_detail_route_entry('issues', owner, repo_name),
     entries.repo_detail_route_entry('pulls', owner, repo_name),
+    entries.repo_detail_route_entry('discussions', owner, repo_name),
     entries.repo_detail_route_entry('branches', owner, repo_name),
     entries.repo_detail_route_entry('tags', owner, repo_name),
   }
@@ -568,6 +651,7 @@ local function list_repo_issues(path, cb)
   local owner = path[3]
   local repo_name = path[4]
   local query = (path[6] == 'search') and path[7] or nil
+  local state = (path[6] == 'open' or path[6] == 'closed') and path[6] or nil
 
   list_paginated(path, cb, {
     fetch_page = function(page, done)
@@ -575,7 +659,7 @@ local function list_repo_issues(path, cb)
       if query and query ~= '' then
         promise = api.search_repo_issues(owner, repo_name, query, page)
       else
-        promise = api.list_repo_issues(owner, repo_name, page)
+        promise = api.list_repo_issues(owner, repo_name, page, state)
       end
 
       promise:next(function(payload)
@@ -594,15 +678,138 @@ local function list_repo_issues(path, cb)
       if query and query ~= '' then
         return entries.info_entry('empty', 'No issues', 'No issues matched this search.', 'darkgray')
       end
-      return entries.info_entry('empty', 'No issues', 'No open issues were returned.', 'darkgray')
+      if state == 'open' then
+        return entries.info_entry('empty', 'No issues', 'No open issues were returned.', 'darkgray')
+      end
+      if state == 'closed' then
+        return entries.info_entry('empty', 'No issues', 'No closed issues were returned.', 'darkgray')
+      end
+      return entries.info_entry('empty', 'No issues', 'No issues were returned.', 'darkgray')
     end,
   })
+end
+
+local function sort_comments(items)
+  table.sort(items, function(a, b)
+    local a_time = tostring(a.sort_time or '')
+    local b_time = tostring(b.sort_time or '')
+    if a_time == b_time then
+      return tostring((a.entry and a.entry.key) or '') < tostring((b.entry and b.entry.key) or '')
+    end
+    return a_time < b_time
+  end)
+  return items
+end
+
+local function sort_by_timestamp(items, field)
+  table.sort(items, function(a, b)
+    local a_time = tostring((a or {})[field] or (a or {}).updated_at or '')
+    local b_time = tostring((b or {})[field] or (b or {}).updated_at or '')
+    if a_time == b_time then
+      return tostring((a or {}).id or (a or {}).node_id or '') < tostring((b or {}).id or (b or {}).node_id or '')
+    end
+    return a_time < b_time
+  end)
+  return items
+end
+
+local function append_pull_review_thread(mapped, comment, replies_by_parent)
+  local suffix = comment.path and (tostring(comment.path) .. ':' .. tostring(comment.line or comment.original_line or '?')) or nil
+  table.insert(mapped, entries.comment_entry(comment, {
+    kind = 'pull_review_comment',
+    prefix = '󰘬',
+    color = 'yellow',
+    suffix = suffix,
+    indent = 2,
+  }))
+
+  for _, reply in ipairs(replies_by_parent[tostring(comment.id or '')] or {}) do
+    local reply_suffix = reply.path and (tostring(reply.path) .. ':' .. tostring(reply.line or reply.original_line or '?')) or nil
+    table.insert(mapped, entries.comment_entry(reply, {
+      kind = 'pull_review_comment',
+      prefix = '󰘍',
+      color = 'cyan',
+      suffix = reply_suffix,
+      indent = 4,
+    }))
+  end
+end
+
+local function collect_all_pages(loader, cb, page, acc)
+  page = tonumber(page or 1) or 1
+  acc = acc or {}
+
+  loader(page):next(function(payload)
+    for _, item in ipairs((payload or {}).items or {}) do
+      table.insert(acc, item)
+    end
+
+    if payload and payload.has_next == true then
+      collect_all_pages(loader, cb, page + 1, acc)
+      return
+    end
+
+    cb(acc, nil)
+  end, function(err)
+    cb(nil, err)
+  end)
+end
+
+local function list_repo_issue_detail(path, cb)
+  local owner = path[3]
+  local repo_name = path[4]
+  local number = tostring(path[6] or '')
+
+  cb {
+    entries.info_entry('loading', 'Loading issue', 'Fetching issue details and comments...', 'cyan'),
+  }
+
+  Promise.all({
+    api.get_issue(owner, repo_name, number),
+    Promise.new(function(resolve, reject)
+      collect_all_pages(function(page)
+        return api.list_issue_comments(owner, repo_name, number, page)
+      end, function(items, err)
+        if err then
+          reject(err)
+          return
+        end
+        resolve(items or {})
+      end)
+    end),
+  }):next(function(results)
+    local issue = results[1] or {}
+    local comments = results[2] or {}
+    issue.owner = issue.owner or owner
+    issue.repo_name = issue.repo_name or repo_name
+
+    local mapped = {
+      entries.issue_detail_entry(issue),
+    }
+
+    if #comments == 0 then
+      table.insert(mapped, entries.info_entry('empty-comments', 'No comments', 'This issue has no comments.', 'darkgray'))
+    else
+      for _, item in ipairs(comments) do
+        table.insert(mapped, entries.comment_entry(item, { kind = 'issue_comment', prefix = '', color = 'blue' }))
+      end
+    end
+
+    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+  end, function(err)
+    if current_path_equals(path) then
+      lc.api.set_entries(nil, {
+        entries.info_entry('error', 'GitHub request failed', err, 'red'),
+      })
+    end
+  end)
 end
 
 local function list_repo_pulls(path, cb)
   local owner = path[3]
   local repo_name = path[4]
   local query = (path[6] == 'search') and path[7] or nil
+  local state = (path[6] == 'open' or path[6] == 'closed') and path[6] or nil
 
   list_paginated(path, cb, {
     fetch_page = function(page, done)
@@ -610,7 +817,7 @@ local function list_repo_pulls(path, cb)
       if query and query ~= '' then
         promise = api.search_repo_pulls(owner, repo_name, query, page)
       else
-        promise = api.list_repo_pulls(owner, repo_name, page)
+        promise = api.list_repo_pulls(owner, repo_name, page, state)
       end
 
       promise:next(function(payload)
@@ -629,9 +836,298 @@ local function list_repo_pulls(path, cb)
       if query and query ~= '' then
         return entries.info_entry('empty', 'No pull requests', 'No pull requests matched this search.', 'darkgray')
       end
-      return entries.info_entry('empty', 'No pull requests', 'No open pull requests were returned.', 'darkgray')
+      if state == 'open' then
+        return entries.info_entry('empty', 'No pull requests', 'No open pull requests were returned.', 'darkgray')
+      end
+      if state == 'closed' then
+        return entries.info_entry('empty', 'No pull requests', 'No closed pull requests were returned.', 'darkgray')
+      end
+      return entries.info_entry('empty', 'No pull requests', 'No pull requests were returned.', 'darkgray')
     end,
   })
+end
+
+local function list_repo_pull_detail(path, cb)
+  local owner = path[3]
+  local repo_name = path[4]
+  local number = tostring(path[6] or '')
+
+  cb {
+    entries.info_entry('loading', 'Loading pull request', 'Fetching pull request details and comments...', 'cyan'),
+  }
+
+  Promise.all({
+    api.get_pull(owner, repo_name, number),
+    Promise.new(function(resolve, reject)
+      collect_all_pages(function(page)
+        return api.list_pull_issue_comments(owner, repo_name, number, page)
+      end, function(items, err)
+        if err then
+          reject(err)
+          return
+        end
+        resolve(items or {})
+      end)
+    end),
+    Promise.new(function(resolve, reject)
+      collect_all_pages(function(page)
+        return api.list_pull_reviews(owner, repo_name, number, page)
+      end, function(items, err)
+        if err then
+          reject(err)
+          return
+        end
+        resolve(items or {})
+      end)
+    end),
+    Promise.new(function(resolve, reject)
+      collect_all_pages(function(page)
+        return api.list_pull_review_comments(owner, repo_name, number, page)
+      end, function(items, err)
+        if err then
+          reject(err)
+          return
+        end
+        resolve(items or {})
+      end)
+    end),
+  }):next(function(results)
+    local pr = results[1] or {}
+    local issue_comments = results[2] or {}
+    local reviews = results[3] or {}
+    local review_comments = results[4] or {}
+    pr.owner = pr.owner or owner
+    pr.repo_name = pr.repo_name or repo_name
+
+    local mapped = {
+      entries.pull_detail_entry(pr),
+    }
+
+    sort_by_timestamp(issue_comments, 'created_at')
+    sort_by_timestamp(reviews, 'submitted_at')
+    sort_by_timestamp(review_comments, 'created_at')
+
+    local replies_by_parent = {}
+    local root_comments = {}
+    for _, item in ipairs(review_comments) do
+      local parent_id = item.in_reply_to_id
+      if parent_id ~= nil and tostring(parent_id) ~= '' then
+        local key = tostring(parent_id)
+        replies_by_parent[key] = replies_by_parent[key] or {}
+        table.insert(replies_by_parent[key], item)
+      else
+        table.insert(root_comments, item)
+      end
+    end
+    for _, items in pairs(replies_by_parent) do
+      sort_by_timestamp(items, 'created_at')
+    end
+
+    local root_comments_by_review = {}
+    local consumed_root_ids = {}
+    for _, item in ipairs(root_comments) do
+      local review_id = item.pull_request_review_id
+      if review_id ~= nil and tostring(review_id) ~= '' then
+        local key = tostring(review_id)
+        root_comments_by_review[key] = root_comments_by_review[key] or {}
+        table.insert(root_comments_by_review[key], item)
+      end
+    end
+    for _, items in pairs(root_comments_by_review) do
+      sort_by_timestamp(items, 'created_at')
+    end
+
+    local events = {}
+
+    for _, item in ipairs(issue_comments) do
+      table.insert(events, {
+        sort_time = tostring(item.created_at or item.updated_at or ''),
+        render = function(out)
+          table.insert(out, entries.comment_entry(item, { kind = 'pull_comment', prefix = '', color = 'blue' }))
+        end,
+      })
+    end
+
+    for _, review in ipairs(reviews) do
+      local review_key = tostring(review.id or '')
+      local attached_roots = root_comments_by_review[review_key] or {}
+      for _, root in ipairs(attached_roots) do
+        consumed_root_ids[tostring(root.id or '')] = true
+      end
+
+      if tostring(review.body or '') ~= '' or #attached_roots > 0 then
+        table.insert(events, {
+          sort_time = tostring(review.submitted_at or review.created_at or review.updated_at or ''),
+          render = function(out)
+            if tostring(review.body or '') ~= '' then
+              table.insert(out, entries.comment_entry(review, {
+                kind = 'pull_review',
+                prefix = '󰙨',
+                color = 'magenta',
+                suffix = tostring(review.state or 'review'),
+              }))
+            end
+
+            for _, root in ipairs(attached_roots) do
+              append_pull_review_thread(out, root, replies_by_parent)
+            end
+          end,
+        })
+      end
+    end
+
+    for _, root in ipairs(root_comments) do
+      local root_id = tostring(root.id or '')
+      if not consumed_root_ids[root_id] then
+        table.insert(events, {
+          sort_time = tostring(root.created_at or root.updated_at or ''),
+          render = function(out)
+            append_pull_review_thread(out, root, replies_by_parent)
+          end,
+        })
+      end
+    end
+
+    table.sort(events, function(a, b)
+      local a_time = tostring(a.sort_time or '')
+      local b_time = tostring(b.sort_time or '')
+      if a_time == b_time then return false end
+      return a_time < b_time
+    end)
+
+    if #events == 0 then
+      table.insert(mapped, entries.info_entry('empty-comments', 'No comments', 'This pull request has no comments.', 'darkgray'))
+    else
+      for _, event in ipairs(events) do
+        event.render(mapped)
+      end
+    end
+
+    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+  end, function(err)
+    if current_path_equals(path) then
+      lc.api.set_entries(nil, {
+        entries.info_entry('error', 'GitHub request failed', err, 'red'),
+      })
+    end
+  end)
+end
+
+local function list_repo_discussions(path, cb)
+  if not api.is_authenticated() then
+    cb {
+      entries.info_entry(
+        'auth',
+        'Token required',
+        'Discussions currently use the GitHub GraphQL API and require a token.',
+        'yellow',
+        "Pass token in require('github').setup { token = ... }."
+      ),
+    }
+    return
+  end
+
+  local owner = path[3]
+  local repo_name = path[4]
+  local cursor_by_page = { [1] = '' }
+
+  list_paginated(path, cb, {
+    fetch_page = function(page, done)
+      local after = cursor_by_page[page] or ''
+      api.list_repo_discussions(owner, repo_name, after):next(function(payload)
+        local mapped = {}
+        for _, item in ipairs(payload.items or {}) do
+          item.owner = owner
+          item.repo_name = repo_name
+          table.insert(mapped, entries.discussion_entry(item))
+        end
+        cursor_by_page[page + 1] = payload.cursor or ''
+        done(mapped, payload.has_next == true, nil)
+      end, function(err)
+        done(nil, nil, err)
+      end)
+    end,
+    empty_entry = function()
+      return entries.info_entry('empty', 'No discussions', 'No discussions were returned.', 'darkgray')
+    end,
+  })
+end
+
+local function list_repo_discussion_detail(path, cb)
+  if not api.is_authenticated() then
+    cb {
+      entries.info_entry(
+        'auth',
+        'Token required',
+        'Discussion details currently use the GitHub GraphQL API and require a token.',
+        'yellow',
+        "Pass token in require('github').setup { token = ... }."
+      ),
+    }
+    return
+  end
+
+  local owner = path[3]
+  local repo_name = path[4]
+  local number = tostring(path[6] or '')
+
+  cb {
+    entries.info_entry('loading', 'Loading discussion', 'Fetching discussion details and comments...', 'cyan'),
+  }
+
+  local all_comments = {}
+  local function collect_discussion_comments(after, resolve, reject)
+    api.list_discussion_comments(owner, repo_name, number, after):next(function(payload)
+      for _, item in ipairs(payload.items or {}) do
+        table.insert(all_comments, item)
+      end
+
+      if payload.has_next == true and payload.cursor and payload.cursor ~= '' then
+        collect_discussion_comments(payload.cursor, resolve, reject)
+        return
+      end
+
+      resolve(all_comments)
+    end, reject)
+  end
+
+  Promise.all({
+    api.get_repo_discussion(owner, repo_name, number),
+    Promise.new(function(resolve, reject)
+      collect_discussion_comments('', resolve, reject)
+    end),
+  }):next(function(results)
+    local discussion = results[1] or {}
+    local comments = results[2] or {}
+
+    local mapped = {
+      entries.discussion_detail_entry(discussion),
+    }
+
+    if #comments == 0 then
+      table.insert(mapped, entries.info_entry('empty-comments', 'No comments', 'This discussion has no comments.', 'darkgray'))
+    else
+      -- Preserve parent-comment grouping: replies should stay adjacent to the
+      -- comment node they came from instead of being globally time-sorted.
+      for _, item in ipairs(comments) do
+        table.insert(mapped, entries.comment_entry(item, {
+          kind = item.kind or 'discussion_comment',
+          prefix = item.is_answer and '' or ((item.kind == 'discussion_reply') and '󰘍' or ''),
+          color = item.is_answer and 'green' or ((item.kind == 'discussion_reply') and 'cyan' or 'blue'),
+          suffix = item.is_answer and 'answer' or nil,
+          indent = item.kind == 'discussion_reply' and 2 or 0,
+        }))
+      end
+    end
+
+    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+  end, function(err)
+    if current_path_equals(path) then
+      lc.api.set_entries(nil, {
+        entries.info_entry('error', 'GitHub request failed', err, 'red'),
+      })
+    end
+  end)
 end
 
 local function list_starred(path, cb)
@@ -731,7 +1227,17 @@ local function list_repo_dispatch(path, cb)
     return
   end
 
-  if #path == 6 and path[5] == 'issues' then
+  if #path == 6 and path[5] == 'issues' and (path[6] == 'open' or path[6] == 'closed') then
+    list_repo_issues(path, cb)
+    return
+  end
+
+  if #path == 6 and path[5] == 'issues' and path[6] ~= 'search' then
+    list_repo_issue_detail(path, cb)
+    return
+  end
+
+  if #path == 6 and path[5] == 'issues' and path[6] == 'search' then
     list_repo_issues(path, cb)
     return
   end
@@ -746,7 +1252,27 @@ local function list_repo_dispatch(path, cb)
     return
   end
 
-  if #path == 6 and path[5] == 'pulls' then
+  if #path == 5 and path[5] == 'discussions' then
+    list_repo_discussions(path, cb)
+    return
+  end
+
+  if #path == 6 and path[5] == 'pulls' and (path[6] == 'open' or path[6] == 'closed') then
+    list_repo_pulls(path, cb)
+    return
+  end
+
+  if #path == 6 and path[5] == 'pulls' and path[6] ~= 'search' then
+    list_repo_pull_detail(path, cb)
+    return
+  end
+
+  if #path == 6 and path[5] == 'discussions' then
+    list_repo_discussion_detail(path, cb)
+    return
+  end
+
+  if #path == 6 and path[5] == 'pulls' and path[6] == 'search' then
     list_repo_pulls(path, cb)
     return
   end
@@ -845,6 +1371,21 @@ function M.list(path, cb)
   local route = path[2]
   if route == 'notifications' then
     list_notifications(path, cb)
+    return
+  end
+
+  if route == 'trending' then
+    if #path == 2 then
+      list_trending_root(path, cb)
+      return
+    end
+
+    if #path == 3 and (path[3] == 'daily' or path[3] == 'weekly' or path[3] == 'monthly') then
+      list_trending_period(path, cb)
+      return
+    end
+
+    cb {}
     return
   end
 

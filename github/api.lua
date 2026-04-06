@@ -10,9 +10,13 @@ local session = {
   viewer = nil,
   users = {},
   repos = {},
+  issues = {},
+  pulls = {},
+  discussions = {},
   readmes = {},
   languages = {},
   contents = {},
+  trending = nil,
 }
 
 local viewer_promise = nil
@@ -115,6 +119,25 @@ local function request(opts)
   end)
 end
 
+local function graphql_request(query, variables)
+  return request({
+    url = tostring(config.get().base_url or 'https://api.github.com') .. '/graphql',
+    method = 'POST',
+    auth_required = true,
+    body = lc.json.encode({
+      query = query,
+      variables = variables or {},
+    }),
+  }):next(function(payload)
+    local data = payload.data or {}
+    if type(data.errors) == 'table' and #data.errors > 0 then
+      local first = data.errors[1] or {}
+      return Promise.reject(tostring(first.message or 'GraphQL request failed'))
+    end
+    return data.data or {}
+  end)
+end
+
 local function encode_path_segment(value) return lc.url.encode(tostring(value or '')) end
 
 local function cache_key(parts) return table.concat(parts, '::') end
@@ -171,10 +194,43 @@ function M.reset()
   session.viewer = nil
   session.users = {}
   session.repos = {}
+  session.issues = {}
+  session.pulls = {}
+  session.discussions = {}
   session.readmes = {}
   session.languages = {}
   session.contents = {}
+  session.trending = nil
   viewer_promise = nil
+end
+
+local function normalize_space(value)
+  value = tostring(value or '')
+  value = value:gsub('%s+', ' ')
+  return trim(value)
+end
+
+local function parse_count(value)
+  value = tostring(value or ''):gsub(',', '')
+  local matched = value:match '(%d+)'
+  return tonumber(matched or '') or 0
+end
+
+local function fetch_html(url, headers)
+  return Promise.new(function(resolve, reject)
+    lc.http.request({
+      url = url,
+      method = 'GET',
+      headers = headers or {},
+      timeout = 30000,
+    }, function(response)
+      if not response or not response.success or (response.status or 0) >= 400 then
+        reject(request_error(response))
+        return
+      end
+      resolve(response.body or '')
+    end)
+  end)
 end
 
 local function encode_path(value)
@@ -248,9 +304,9 @@ function M.list_following(page)
 end
 
 function M.list_notifications(page)
-  return remember(cache_key { 'notifications', tostring(page or 1), tostring(config.get().per_page) }, cache_ttl 'notifications', function()
+  return remember(cache_key { 'notifications_v2', tostring(page or 1), tostring(config.get().per_page) }, cache_ttl 'notifications', function()
     return request({
-      path = '/notifications' .. paged_suffix(page, { 'all=false', 'participating=false' }),
+      path = '/notifications' .. paged_suffix(page, { 'all=true', 'participating=false' }),
       auth_required = true,
     }):next(function(payload)
       return {
@@ -421,8 +477,17 @@ local function search_repo_items(owner, repo, query, item_kind, page, cache_name
         'q=' .. lc.url.encode(qualified_query),
       }),
     }):next(function(payload)
+      local items = type(payload.data) == 'table' and payload.data.items or {}
+      if item_kind == 'pr' then
+        for _, item in ipairs(items) do
+          local pr_meta = (item or {}).pull_request or {}
+          if item.merged_at == nil and pr_meta.merged_at ~= nil then
+            item.merged_at = pr_meta.merged_at
+          end
+        end
+      end
       return {
-        items = type(payload.data) == 'table' and payload.data.items or {},
+        items = items,
         has_next = has_next_page(payload.response and payload.response.headers),
       }
     end)
@@ -435,6 +500,76 @@ end
 
 function M.search_repo_pulls(owner, repo, query, page)
   return search_repo_items(owner, repo, query, 'pr', page, 'search_repo_pulls')
+end
+
+local function parse_trending_repo(article)
+  local title_link = article:first 'h2 a'
+  local href = title_link and title_link:attr 'href' or ''
+  local full_name = normalize_space(title_link and title_link:text() or '')
+  full_name = full_name:gsub('%s*/%s*', '/')
+
+  if full_name == '' and href ~= '' then
+    full_name = tostring(href):gsub('^/', '')
+  end
+
+  local owner, repo = full_name:match '^([^/]+)/(.+)$'
+  if not owner or not repo then return nil end
+
+  local description_node = article:first 'p'
+  local language_node = article:first '[itemprop="programmingLanguage"]'
+  local stars_node = article:first('a[href$="/stargazers"]')
+  local forks_node = article:first('a[href$="/forks"]')
+  local today_node = article:first 'span.d-inline-block.float-sm-right'
+
+  local description = normalize_space(description_node and description_node:text() or '')
+  local language = normalize_space(language_node and language_node:text() or '')
+  local stars_today = normalize_space(today_node and today_node:text() or '')
+
+  return {
+    owner = {
+      login = owner,
+    },
+    name = repo,
+    full_name = full_name,
+    html_url = 'https://github.com/' .. owner .. '/' .. repo,
+    description = description ~= '' and description or nil,
+    language = language ~= '' and language or nil,
+    stargazers_count = parse_count(stars_node and stars_node:text() or ''),
+    forks_count = parse_count(forks_node and forks_node:text() or ''),
+    trending_stars_today = stars_today,
+  }
+end
+
+function M.list_trending(period)
+  period = trim(period)
+  if period == '' then period = 'daily' end
+  if period ~= 'daily' and period ~= 'weekly' and period ~= 'monthly' then
+    return Promise.reject('Unsupported trending period: ' .. tostring(period))
+  end
+
+  session.trending = session.trending or {}
+  if session.trending[period] then return Promise.resolve(session.trending[period]) end
+
+  return remember(cache_key { 'trending_v3', period, 'any' }, cache_ttl 'trending', function()
+    return fetch_html('https://github.com/trending?since=' .. period, {
+      Accept = 'text/html,application/xhtml+xml',
+      ['User-Agent'] = USER_AGENT,
+    }):next(function(body)
+      local doc = lc.html.parse(body)
+      local articles = (doc:select 'article.Box-row'):to_table()
+      local items = {}
+
+      for _, article in ipairs(articles) do
+        local item = parse_trending_repo(article)
+        if item then table.insert(items, item) end
+      end
+
+      return items
+    end)
+  end):next(function(items)
+    session.trending[period] = items or {}
+    return session.trending[period]
+  end)
 end
 
 function M.list_repo_branches(owner, repo, page)
@@ -586,28 +721,110 @@ function M.get_repo_readme(owner, repo)
   end)
 end
 
-function M.list_repo_issues(owner, repo, page)
+function M.get_issue(owner, repo, number)
   owner = trim(owner)
   repo = trim(repo)
+  number = tostring(number or '')
+  local key = table.concat({ owner, repo, number }, '/')
+
+  if session.issues[key] then return Promise.resolve(session.issues[key]) end
+
+  return remember(cache_key { 'issue', key }, cache_ttl 'repo_issues', function()
+    return request({
+      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/issues/' .. encode_path_segment(number),
+    }):next(function(payload) return payload.data end)
+  end):next(function(data)
+    session.issues[key] = data
+    return data
+  end)
+end
+
+function M.list_issue_comments(owner, repo, number, page)
+  owner = trim(owner)
+  repo = trim(repo)
+  number = tostring(number or '')
+
+  return remember(cache_key {
+    'issue_comments',
+    owner,
+    repo,
+    number,
+    tostring(page or 1),
+    tostring(config.get().per_page),
+  }, cache_ttl 'repo_issues', function()
+    return request({
+      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/issues/' .. encode_path_segment(number)
+        .. '/comments' .. paged_suffix(page),
+    }):next(function(payload)
+      return {
+        items = payload.data or {},
+        has_next = has_next_page(payload.response and payload.response.headers),
+      }
+    end)
+  end)
+end
+
+function M.list_repo_issues(owner, repo, page, state)
+  owner = trim(owner)
+  repo = trim(repo)
+  state = trim(state)
+
+  local qualified_query = string.format('repo:%s/%s is:issue', owner, repo)
+  if state ~= '' then qualified_query = qualified_query .. ' state:' .. state end
 
   return remember(cache_key {
     'repo_issues',
     owner,
     repo,
+    state,
     tostring(page or 1),
     tostring(config.get().per_page),
   }, cache_ttl 'repo_issues', function()
     return request({
-      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/issues'
-        .. paged_suffix(page, { 'state=all' }),
+      path = '/search/issues' .. paged_suffix(page, {
+        'q=' .. lc.url.encode(qualified_query),
+        'sort=created',
+        'order=desc',
+      }),
     }):next(function(payload)
-      local items = {}
-      for _, item in ipairs(payload.data or {}) do
-        if not item.pull_request then
-          table.insert(items, item)
+      return {
+        items = type(payload.data) == 'table' and payload.data.items or {},
+        has_next = has_next_page(payload.response and payload.response.headers),
+      }
+    end)
+  end)
+end
+
+function M.list_repo_pulls(owner, repo, page, state)
+  owner = trim(owner)
+  repo = trim(repo)
+  state = trim(state)
+
+  local qualified_query = string.format('repo:%s/%s is:pr', owner, repo)
+  if state ~= '' then qualified_query = qualified_query .. ' state:' .. state end
+
+  return remember(cache_key {
+    'repo_pulls',
+    owner,
+    repo,
+    state,
+    tostring(page or 1),
+    tostring(config.get().per_page),
+  }, cache_ttl 'repo_pulls', function()
+    return request({
+      path = '/search/issues' .. paged_suffix(page, {
+        'q=' .. lc.url.encode(qualified_query),
+        'sort=created',
+        'order=desc',
+      }),
+    }):next(function(payload)
+      local items = type(payload.data) == 'table' and payload.data.items or {}
+      for _, item in ipairs(items) do
+        local pr_meta = (item or {}).pull_request or {}
+        if item.merged_at == nil and pr_meta.merged_at ~= nil then
+          item.merged_at = pr_meta.merged_at
         end
       end
-
       return {
         items = items,
         has_next = has_next_page(payload.response and payload.response.headers),
@@ -616,24 +833,357 @@ function M.list_repo_issues(owner, repo, page)
   end)
 end
 
-function M.list_repo_pulls(owner, repo, page)
+function M.get_pull(owner, repo, number)
   owner = trim(owner)
   repo = trim(repo)
+  number = tostring(number or '')
+  local key = table.concat({ owner, repo, number }, '/')
+
+  if session.pulls[key] then return Promise.resolve(session.pulls[key]) end
+
+  return remember(cache_key { 'pull', key }, cache_ttl 'repo_pulls', function()
+    return request({
+      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/pulls/' .. encode_path_segment(number),
+    }):next(function(payload) return payload.data end)
+  end):next(function(data)
+    session.pulls[key] = data
+    return data
+  end)
+end
+
+function M.list_pull_issue_comments(owner, repo, number, page)
+  return M.list_issue_comments(owner, repo, number, page)
+end
+
+function M.list_pull_review_comments(owner, repo, number, page)
+  owner = trim(owner)
+  repo = trim(repo)
+  number = tostring(number or '')
 
   return remember(cache_key {
-    'repo_pulls',
+    'pull_review_comments',
     owner,
     repo,
+    number,
     tostring(page or 1),
     tostring(config.get().per_page),
   }, cache_ttl 'repo_pulls', function()
     return request({
-      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/pulls'
-        .. paged_suffix(page, { 'state=all' }),
+      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/pulls/' .. encode_path_segment(number)
+        .. '/comments' .. paged_suffix(page),
     }):next(function(payload)
       return {
         items = payload.data or {},
         has_next = has_next_page(payload.response and payload.response.headers),
+      }
+    end)
+  end)
+end
+
+function M.list_pull_reviews(owner, repo, number, page)
+  owner = trim(owner)
+  repo = trim(repo)
+  number = tostring(number or '')
+
+  return remember(cache_key {
+    'pull_reviews',
+    owner,
+    repo,
+    number,
+    tostring(page or 1),
+    tostring(config.get().per_page),
+  }, cache_ttl 'repo_pulls', function()
+    return request({
+      path = '/repos/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo) .. '/pulls/' .. encode_path_segment(number)
+        .. '/reviews' .. paged_suffix(page),
+    }):next(function(payload)
+      return {
+        items = payload.data or {},
+        has_next = has_next_page(payload.response and payload.response.headers),
+      }
+    end)
+  end)
+end
+
+local function normalize_discussion_author(author)
+  if type(author) ~= 'table' then return {} end
+  return {
+    login = author.login,
+  }
+end
+
+local function normalize_discussion_category(category)
+  if type(category) ~= 'table' then return nil end
+  return {
+    name = category.name,
+    emoji = category.emoji or category.emojiHTML,
+  }
+end
+
+local function normalize_discussion_item(item, owner, repo)
+  item = item or {}
+  return {
+    id = item.id,
+    number = item.number,
+    title = item.title,
+    body = item.body or '',
+    html_url = item.url,
+    created_at = item.createdAt,
+    updated_at = item.updatedAt,
+    closed_at = item.closedAt,
+    state = item.closed and 'closed' or 'open',
+    closed = item.closed == true,
+    is_answered = item.isAnswered == true,
+    answer_chosen_at = item.answerChosenAt,
+    comments = ((item.comments or {}).totalCount) or 0,
+    upvote_count = item.upvoteCount or 0,
+    author = normalize_discussion_author(item.author),
+    user = normalize_discussion_author(item.author),
+    category = normalize_discussion_category(item.category),
+    owner = owner,
+    repo_name = repo,
+  }
+end
+
+local function normalize_discussion_comment(item, discussion)
+  item = item or {}
+  return {
+    id = item.databaseId or item.id,
+    node_id = item.id,
+    body = item.body or '',
+    html_url = item.url,
+    created_at = item.createdAt,
+    updated_at = item.updatedAt,
+    is_answer = item.isAnswer == true,
+    author = normalize_discussion_author(item.author),
+    user = normalize_discussion_author(item.author),
+    discussion_number = discussion and discussion.number or nil,
+    owner = discussion and discussion.owner or nil,
+    repo_name = discussion and discussion.repo_name or nil,
+  }
+end
+
+function M.list_repo_discussions(owner, repo, after)
+  owner = trim(owner)
+  repo = trim(repo)
+  after = trim(after)
+
+  if owner == '' or repo == '' then return Promise.reject('Repository path is required') end
+
+  local cache_id = cache_key({
+    'repo_discussions',
+    owner,
+    repo,
+    after,
+    tostring(config.get().per_page),
+  })
+
+  return remember(cache_id, cache_ttl 'repo_discussions', function()
+    return graphql_request([[
+      query($owner: String!, $repo: String!, $first: Int!, $after: String) {
+        repository(owner: $owner, name: $repo) {
+          discussions(first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+            nodes {
+              id
+              number
+              title
+              url
+              createdAt
+              updatedAt
+              closed
+              closedAt
+              isAnswered
+              answerChosenAt
+              upvoteCount
+              author {
+                login
+              }
+              category {
+                name
+                emoji
+              }
+              comments {
+                totalCount
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    ]], {
+      owner = owner,
+      repo = repo,
+      first = tonumber(config.get().per_page) or 20,
+      after = after ~= '' and after or nil,
+    }):next(function(data)
+      local repository = data.repository
+      if not repository then return Promise.reject('Repository not found or discussions unavailable') end
+
+      local connection = repository.discussions or {}
+      local items = {}
+      for _, item in ipairs(connection.nodes or {}) do
+        table.insert(items, normalize_discussion_item(item, owner, repo))
+      end
+
+      return {
+        items = items,
+        has_next = ((connection.pageInfo or {}).hasNextPage) == true,
+        cursor = (connection.pageInfo or {}).endCursor,
+      }
+    end)
+  end)
+end
+
+function M.get_repo_discussion(owner, repo, number)
+  owner = trim(owner)
+  repo = trim(repo)
+  number = tonumber(number)
+  if owner == '' or repo == '' then return Promise.reject('Repository path is required') end
+  if not number then return Promise.reject('Discussion number is required') end
+
+  local key = table.concat({ owner, repo, tostring(number) }, '/')
+  if session.discussions[key] then return Promise.resolve(session.discussions[key]) end
+
+  return remember(cache_key { 'repo_discussion', key }, cache_ttl 'repo_discussions', function()
+    return graphql_request([[
+      query($owner: String!, $repo: String!, $number: Int!) {
+        repository(owner: $owner, name: $repo) {
+          discussion(number: $number) {
+            id
+            number
+            title
+            body
+            url
+            createdAt
+            updatedAt
+            closed
+            closedAt
+            isAnswered
+            answerChosenAt
+            upvoteCount
+            author {
+              login
+            }
+            category {
+              name
+              emoji
+            }
+            comments {
+              totalCount
+            }
+          }
+        }
+      }
+    ]], {
+      owner = owner,
+      repo = repo,
+      number = number,
+    }):next(function(data)
+      local repository = data.repository
+      local discussion = repository and repository.discussion or nil
+      if not discussion then return Promise.reject('Discussion not found') end
+      return normalize_discussion_item(discussion, owner, repo)
+    end)
+  end):next(function(data)
+    session.discussions[key] = data
+    return data
+  end)
+end
+
+function M.list_discussion_comments(owner, repo, number, after)
+  owner = trim(owner)
+  repo = trim(repo)
+  number = tonumber(number)
+  after = trim(after)
+
+  if owner == '' or repo == '' then return Promise.reject('Repository path is required') end
+  if not number then return Promise.reject('Discussion number is required') end
+
+  local cache_id = cache_key({
+    'discussion_comments',
+    owner,
+    repo,
+    tostring(number),
+    after,
+  })
+
+  return remember(cache_id, cache_ttl 'repo_discussions', function()
+    return graphql_request([[
+      query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+        repository(owner: $owner, name: $repo) {
+          discussion(number: $number) {
+            number
+            comments(first: 100, after: $after) {
+              nodes {
+                id
+                databaseId
+                body
+                url
+                createdAt
+                updatedAt
+                isAnswer
+                author {
+                  login
+                }
+                replies(first: 100) {
+                  nodes {
+                    id
+                    databaseId
+                    body
+                    url
+                    createdAt
+                    updatedAt
+                    author {
+                      login
+                    }
+                  }
+                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      }
+    ]], {
+      owner = owner,
+      repo = repo,
+      number = number,
+      after = after ~= '' and after or nil,
+    }):next(function(data)
+      local repository = data.repository
+      local discussion_node = repository and repository.discussion or nil
+      if not discussion_node then return Promise.reject('Discussion not found') end
+
+      local discussion = {
+        owner = owner,
+        repo_name = repo,
+        number = number,
+      }
+      local connection = discussion_node.comments or {}
+      local items = {}
+
+      for _, item in ipairs(connection.nodes or {}) do
+        local normalized = normalize_discussion_comment(item, discussion)
+        normalized.kind = 'discussion_comment'
+        table.insert(items, normalized)
+
+        for _, reply in ipairs((((item or {}).replies or {}).nodes) or {}) do
+          local normalized_reply = normalize_discussion_comment(reply, discussion)
+          normalized_reply.kind = 'discussion_reply'
+          table.insert(items, normalized_reply)
+        end
+      end
+
+      return {
+        items = items,
+        has_next = ((connection.pageInfo or {}).hasNextPage) == true,
+        cursor = (connection.pageInfo or {}).endCursor,
       }
     end)
   end)
