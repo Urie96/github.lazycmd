@@ -28,12 +28,38 @@ local function repo_path(owner, repo)
   return { 'github', 'repo', owner }
 end
 
+local function has_value(value) return value ~= nil and tostring(value) ~= '' end
+
+local function resolve_repo_file_entry(entry)
+  entry = entry or hovered_entry()
+  if not entry then return nil, 'No file selected' end
+
+  local base = entry.item or entry
+  local is_dir = entry.is_dir == true or base.is_dir == true or base.type == 'dir'
+  local raw_path = entry.path or base.path
+  local item_path = raw_path and tostring(raw_path):gsub('^/', '') or ''
+
+  local info = {
+    entry = entry,
+    is_dir = is_dir,
+    owner = entry.owner or base.owner,
+    repo_name = entry.repo_name or base.repo_name,
+    ref_name = entry.ref_name or base.ref_name,
+    item_path = item_path,
+    name = tostring((base and base.name) or entry.key or 'file'),
+  }
+
+  if not info.is_dir and (not has_value(info.owner) or not has_value(info.repo_name) or not has_value(info.ref_name) or not has_value(info.item_path)) then
+    return nil, 'File path information is unavailable'
+  end
+
+  return info
+end
+
 local function current_repo_owner()
   local path = lc.api.get_current_path() or {}
   if path[2] == 'repo' and path[3] and path[3] ~= '' then return tostring(path[3]) end
 end
-
-local function has_value(value) return value ~= nil and tostring(value) ~= '' end
 
 local function bool_text(value) return value and 'yes' or 'no' end
 
@@ -307,6 +333,38 @@ function M.open_in_browser(entry)
     return
   end
   lc.system.open(url)
+end
+
+function M.open_file_in_editor(entry)
+  local info, err = resolve_repo_file_entry(entry)
+  if not info then
+    lc.notify(err)
+    return
+  end
+
+  if info.is_dir then
+    local path = lc.api.get_current_path()
+    table.insert(path, info.entry.key)
+    lc.api.go_to(path)
+    return
+  end
+
+  lc.notify 'Downloading file...'
+
+  api.get_repo_contents(info.owner, info.repo_name, info.ref_name, info.item_path):next(function(data)
+    local content = data and data.decoded_content or ''
+    if content == '' then
+      lc.notify 'This file does not expose decodable text content'
+      return
+    end
+
+    lc.system.edit({
+      content = content,
+      ext = info.name,
+    })
+  end, function(fetch_err)
+    lc.notify('Failed to fetch file: ' .. tostring(fetch_err))
+  end)
 end
 
 function M.go_to_path(path)

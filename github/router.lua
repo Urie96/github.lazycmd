@@ -71,8 +71,12 @@ local function get_repo_browser(owner, repo, ref_kind, ref_name)
 end
 
 local function decorate_repo_browser_entries(items)
-  local keymap = (config.get() or {}).keymap or {}
-  local browser_key_name = keymap.open_in_browser
+  local plugin_keymap = (config.get() or {}).keymap or {}
+  local global_config = (lc.config.get() or {}).keymap or {}
+  local browser_key_name = plugin_keymap.open_in_browser
+  local enter_key_name = global_config.enter
+  local open_key_name = global_config.open
+  local base_path = lc.api.get_current_path() or {}
   local out = {}
 
   for _, entry in ipairs(items or {}) do
@@ -84,11 +88,30 @@ local function decorate_repo_browser_entries(items)
       entry.html_url = entry.handle.html_url
       entry.web_url = entry.handle.web_url
 
+      local maps = lc.tbl_extend('force', {}, entry.keymap or {})
+
       if browser_key_name and browser_key_name ~= '' and entry.web_url then
-        local maps = lc.tbl_extend('force', {}, entry.keymap or {})
         maps[browser_key_name] = { callback = action.open_in_browser, desc = 'open in browser' }
-        entry.keymap = maps
       end
+
+      if not entry.handle.is_dir then
+        -- For files: enter opens in $EDITOR, open/right keeps default browser action
+        if enter_key_name and enter_key_name ~= '' then
+          maps[enter_key_name] = { callback = action.open_file_in_editor, desc = 'open in editor' }
+        end
+      else
+        -- For directories: enter/open navigates into the directory
+        local nav_path = { table.unpack(base_path) }
+        table.insert(nav_path, entry.key)
+        if enter_key_name and enter_key_name ~= '' then
+          maps[enter_key_name] = { callback = function() action.go_to_path(nav_path) end, desc = 'open directory' }
+        end
+        if open_key_name and open_key_name ~= '' and open_key_name ~= enter_key_name then
+          maps[open_key_name] = { callback = function() action.go_to_path(nav_path) end, desc = 'open directory' }
+        end
+      end
+
+      entry.keymap = maps
     end
     table.insert(out, entry)
   end
