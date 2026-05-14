@@ -34,12 +34,13 @@ local cfg = {
     filter_state = 'f',
     open_user = 'u',
     open_in_browser = 'o',
+    clone = 'c',
   },
 }
 
 function M.setup(opt)
-  local global_keymap = lc.config.get().keymap or {}
-  cfg = lc.tbl_deep_extend('force', cfg, { keymap = global_keymap }, opt or {})
+  local global_keymap = deck.config.get().keymap or {}
+  cfg = deck.tbl_deep_extend('force', cfg, { keymap = global_keymap }, opt or {})
 end
 
 function M.get() return cfg end

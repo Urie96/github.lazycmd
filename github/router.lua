@@ -38,7 +38,7 @@ local function clone_entries(items)
   return copied
 end
 
-local function current_path_equals(path) return lc.deep_equal(path or {}, lc.api.get_current_path() or {}) end
+local function current_path_equals(path) return deck.deep_equal(path or {}, deck.api.get_current_path() or {}) end
 
 local function browser_key(owner, repo, ref_kind, ref_name)
   return table.concat({ owner, repo, ref_kind, ref_name }, '\x1f')
@@ -72,11 +72,11 @@ end
 
 local function decorate_repo_browser_entries(items)
   local plugin_keymap = (config.get() or {}).keymap or {}
-  local global_config = (lc.config.get() or {}).keymap or {}
+  local global_config = (deck.config.get() or {}).keymap or {}
   local browser_key_name = plugin_keymap.open_in_browser
   local enter_key_name = global_config.enter
   local open_key_name = global_config.open
-  local base_path = lc.api.get_current_path() or {}
+  local base_path = deck.api.get_current_path() or {}
   local out = {}
 
   for _, entry in ipairs(items or {}) do
@@ -88,7 +88,7 @@ local function decorate_repo_browser_entries(items)
       entry.html_url = entry.handle.html_url
       entry.web_url = entry.handle.web_url
 
-      local maps = lc.tbl_extend('force', {}, entry.keymap or {})
+      local maps = deck.tbl_extend('force', {}, entry.keymap or {})
 
       if browser_key_name and browser_key_name ~= '' and entry.web_url then
         maps[browser_key_name] = { callback = action.open_in_browser, desc = 'open in browser' }
@@ -185,7 +185,7 @@ local function materialize_pagination(state)
 end
 
 local function refresh_state(state)
-  if current_path_equals(state.path) then lc.api.set_entries(nil, materialize_pagination(state)) end
+  if current_path_equals(state.path) then deck.api.set_entries(nil, materialize_pagination(state)) end
 end
 
 load_page = function(state, initial_cb)
@@ -208,7 +208,7 @@ load_page = function(state, initial_cb)
           entries.info_entry('error', 'GitHub request failed', err, 'red'),
         }
       else
-        lc.notify(err)
+        deck.notify(err)
         state.done = true
       end
 
@@ -343,9 +343,9 @@ local function list_trending_root(_, cb)
       title = label,
       detail = detail,
       color = color,
-      display = lc.style.line {
-        lc.style.span(' ', color),
-        lc.style.span(label, color),
+      display = deck.style.line {
+        deck.style.span(' ', color),
+        deck.style.span(label, color),
       },
       keymap = {
         [plugin_keymap.open] = { callback = function() action.go_to_path(path) end, desc = 'open' },
@@ -393,10 +393,10 @@ local function list_trending_period(path, cb)
       entries.align_repo_entry_columns(mapped)
     end
 
-    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+    if current_path_equals(path) then deck.api.set_entries(nil, mapped) end
   end, function(err)
     if current_path_equals(path) then
-      lc.api.set_entries(nil, {
+      deck.api.set_entries(nil, {
         entries.info_entry('error', 'GitHub request failed', err, 'red'),
       })
     end
@@ -411,9 +411,9 @@ local function list_repo_root(path, cb)
       kind = 'info',
       title = 'Open any user',
       color = 'cyan',
-      display = lc.style.line {
-        lc.style.span('Open User'):fg 'cyan',
-        lc.style.span('  input a username'):fg 'darkgray',
+      display = deck.style.line {
+        deck.style.span('Open User'):fg 'cyan',
+        deck.style.span('  input a username'):fg 'darkgray',
       },
       keymap = {
         [plugin_keymap.open] = { callback = action.open_user_input, desc = 'open' },
@@ -538,7 +538,7 @@ local function prioritize_default_branch(items, default_branch)
   end
 
   if not matched then return items or {} end
-  return lc.list_extend({ matched }, rest)
+  return deck.list_extend({ matched }, rest)
 end
 
 local function list_repo_branches(path, cb)
@@ -573,7 +573,7 @@ local function list_repo_branches(path, cb)
 
     if current_path_equals(path) then
       local state = runtime.paginations[key]
-      lc.api.set_entries(nil, materialize_pagination(state))
+      deck.api.set_entries(nil, materialize_pagination(state))
     end
   end
 
@@ -599,14 +599,14 @@ local function list_repo_branches(path, cb)
 
     if current_path_equals(path) then
       local state = runtime.paginations[key]
-      lc.api.set_entries(nil, materialize_pagination(state))
+      deck.api.set_entries(nil, materialize_pagination(state))
     end
   end
 
   api.get_repo(owner, repo_name):next(function(repo)
     local default_branch = tostring((repo or {}).default_branch or '')
     if default_branch ~= '' and current_path_equals(path) then
-      lc.api.set_entries(nil, {
+      deck.api.set_entries(nil, {
         entries.repo_ref_entry(owner, repo_name, 'branches', {
           name = default_branch,
           commit = {},
@@ -818,10 +818,10 @@ local function list_repo_issue_detail(path, cb)
       end
     end
 
-    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+    if current_path_equals(path) then deck.api.set_entries(nil, mapped) end
   end, function(err)
     if current_path_equals(path) then
-      lc.api.set_entries(nil, {
+      deck.api.set_entries(nil, {
         entries.info_entry('error', 'GitHub request failed', err, 'red'),
       })
     end
@@ -1026,10 +1026,10 @@ local function list_repo_pull_detail(path, cb)
       end
     end
 
-    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+    if current_path_equals(path) then deck.api.set_entries(nil, mapped) end
   end, function(err)
     if current_path_equals(path) then
-      lc.api.set_entries(nil, {
+      deck.api.set_entries(nil, {
         entries.info_entry('error', 'GitHub request failed', err, 'red'),
       })
     end
@@ -1143,10 +1143,10 @@ local function list_repo_discussion_detail(path, cb)
       end
     end
 
-    if current_path_equals(path) then lc.api.set_entries(nil, mapped) end
+    if current_path_equals(path) then deck.api.set_entries(nil, mapped) end
   end, function(err)
     if current_path_equals(path) then
-      lc.api.set_entries(nil, {
+      deck.api.set_entries(nil, {
         entries.info_entry('error', 'GitHub request failed', err, 'red'),
       })
     end
@@ -1356,7 +1356,7 @@ function M.list(path, cb)
   if path[2] == 'notifications' and #path == 3 then
     local owner, repo = decode_repo_ref(path[3])
     if owner and repo then
-      lc.api.go_to { 'github', 'repo', owner, repo }
+      deck.api.go_to { 'github', 'repo', owner, repo }
       cb {
         entries.info_entry('redirect', 'Redirecting', 'Opening repository...', 'yellow'),
       }
@@ -1367,7 +1367,7 @@ function M.list(path, cb)
   if path[2] == 'starred' and #path == 3 then
     local owner, repo = decode_repo_ref(path[3])
     if owner and repo then
-      lc.api.go_to { 'github', 'repo', owner, repo }
+      deck.api.go_to { 'github', 'repo', owner, repo }
       cb {
         entries.info_entry('redirect', 'Redirecting', 'Opening repository...', 'yellow'),
       }
@@ -1378,7 +1378,7 @@ function M.list(path, cb)
   if path[2] == 'search' and path[3] == 'repo' and #path == 5 then
     local owner, repo = decode_repo_ref(path[5])
     if owner and repo then
-      lc.api.go_to { 'github', 'repo', owner, repo }
+      deck.api.go_to { 'github', 'repo', owner, repo }
       cb {
         entries.info_entry('redirect', 'Redirecting', 'Opening repository...', 'yellow'),
       }

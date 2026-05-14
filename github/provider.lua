@@ -39,8 +39,8 @@ local function repo_ref_web_url(owner, repo, ref_name, item_path, is_file)
   local base = 'https://github.com/' .. owner .. '/' .. repo
   local mode = is_file and 'blob' or 'tree'
   local suffix = ''
-  if item_path and item_path ~= '' then suffix = '/' .. lc.url.encode(item_path):gsub('%%2F', '/') end
-  return string.format('%s/%s/%s%s', base, mode, lc.url.encode(ref_name):gsub('%%2F', '/'), suffix)
+  if item_path and item_path ~= '' then suffix = '/' .. deck.url.encode(item_path):gsub('%%2F', '/') end
+  return string.format('%s/%s/%s%s', base, mode, deck.url.encode(ref_name):gsub('%%2F', '/'), suffix)
 end
 
 function M.new(owner, repo_name, ref_kind, ref_name)

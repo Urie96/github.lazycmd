@@ -6,12 +6,12 @@ local M = {}
 
 function M.setup(opt)
   config.setup(opt or {})
-  lc.plugin.load 'file'
+  deck.plugin.load 'file'
   api.reset()
   router.reset()
   api.prime_viewer()
 
-  lc.hook.pre_reload(function()
+  deck.hook.pre_reload(function()
     api.reset()
     router.reset()
     api.prime_viewer()

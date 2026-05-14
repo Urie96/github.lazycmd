@@ -2,7 +2,7 @@ local config = require 'github.config'
 
 local M = {}
 
-local USER_AGENT = 'lazycmd-github-plugin'
+local USER_AGENT = 'lazydeck-github-plugin'
 local API_VERSION = '2022-11-28'
 local CACHE_NAMESPACE = 'github.api'
 
@@ -47,7 +47,7 @@ local function request_error(response)
   local fallback = response and response.error or 'Request failed'
   local body = response and response.body or ''
   if body ~= '' then
-    local ok, data = pcall(lc.json.decode, body)
+    local ok, data = pcall(deck.json.decode, body)
     if ok and type(data) == 'table' and data.message and data.message ~= '' then return tostring(data.message) end
   end
 
@@ -85,7 +85,7 @@ local function request(opts)
     end
 
     local url = opts.url or (config.get().base_url .. tostring(opts.path or ''))
-    lc.http.request({
+    deck.http.request({
       url = url,
       method = opts.method or 'GET',
       headers = build_headers(opts.headers, opts.include_token ~= false),
@@ -105,7 +105,7 @@ local function request(opts)
         return
       end
 
-      local ok, data = pcall(lc.json.decode, response.body or '')
+      local ok, data = pcall(deck.json.decode, response.body or '')
       if not ok then
         reject('Failed to decode GitHub API response')
         return
@@ -124,7 +124,7 @@ local function graphql_request(query, variables)
     url = tostring(config.get().base_url or 'https://api.github.com') .. '/graphql',
     method = 'POST',
     auth_required = true,
-    body = lc.json.encode({
+    body = deck.json.encode({
       query = query,
       variables = variables or {},
     }),
@@ -138,18 +138,18 @@ local function graphql_request(query, variables)
   end)
 end
 
-local function encode_path_segment(value) return lc.url.encode(tostring(value or '')) end
+local function encode_path_segment(value) return deck.url.encode(tostring(value or '')) end
 
 local function cache_key(parts) return table.concat(parts, '::') end
 
 local function cache_get(key)
-  local ok, value = pcall(lc.cache.get, CACHE_NAMESPACE, key)
+  local ok, value = pcall(deck.cache.get, CACHE_NAMESPACE, key)
   if ok then return value end
   return nil
 end
 
 local function cache_set(key, value, ttl)
-  pcall(lc.cache.set, CACHE_NAMESPACE, key, value, { ttl = ttl })
+  pcall(deck.cache.set, CACHE_NAMESPACE, key, value, { ttl = ttl })
 end
 
 local function cache_ttl(name)
@@ -218,7 +218,7 @@ end
 
 local function fetch_html(url, headers)
   return Promise.new(function(resolve, reject)
-    lc.http.request({
+    deck.http.request({
       url = url,
       method = 'GET',
       headers = headers or {},
@@ -406,7 +406,7 @@ function M.search_repositories(query, page)
   }, cache_ttl 'search_repositories', function()
     return request({
       path = '/search/repositories' .. paged_suffix(page, {
-        'q=' .. lc.url.encode(query),
+        'q=' .. deck.url.encode(query),
       }),
     }):next(function(payload)
       return {
@@ -435,7 +435,7 @@ function M.search_users(query, page)
   }, cache_ttl 'search_users', function()
     return request({
       path = '/search/users' .. paged_suffix(page, {
-        'q=' .. lc.url.encode(query),
+        'q=' .. deck.url.encode(query),
         'sort=followers',
         'order=desc',
       }),
@@ -474,7 +474,7 @@ local function search_repo_items(owner, repo, query, item_kind, page, cache_name
   }, cache_ttl(cache_name), function()
     return request({
       path = '/search/issues' .. paged_suffix(page, {
-        'q=' .. lc.url.encode(qualified_query),
+        'q=' .. deck.url.encode(qualified_query),
       }),
     }):next(function(payload)
       local items = type(payload.data) == 'table' and payload.data.items or {}
@@ -555,7 +555,7 @@ function M.list_trending(period)
       Accept = 'text/html,application/xhtml+xml',
       ['User-Agent'] = USER_AGENT,
     }):next(function(body)
-      local doc = lc.html.parse(body)
+      local doc = deck.html.parse(body)
       local articles = (doc:select 'article.Box-row'):to_table()
       local items = {}
 
@@ -641,13 +641,13 @@ function M.get_repo_contents(owner, repo, ref, content_path)
     content_path,
   }, cache_ttl 'repo_contents', function()
     return request({
-      path = api_path .. '?ref=' .. lc.url.encode(ref),
+      path = api_path .. '?ref=' .. deck.url.encode(ref),
     }):next(function(payload)
       local data = payload.data
       if type(data) == 'table' and data.type == 'file' then
         local content = tostring(data.content or '')
         if content ~= '' then
-          local ok, decoded = pcall(lc.base64.decode, content:gsub('%s', ''))
+          local ok, decoded = pcall(deck.base64.decode, content:gsub('%s', ''))
           if ok then data.decoded_content = decoded end
         end
       end
@@ -711,7 +711,7 @@ function M.get_repo_readme(owner, repo)
       end
 
       content = content:gsub('%s', '')
-      local ok, decoded = pcall(lc.base64.decode, content)
+      local ok, decoded = pcall(deck.base64.decode, content)
       if not ok then return Promise.reject('Failed to decode README content') end
       return decoded
     end)
@@ -782,7 +782,7 @@ function M.list_repo_issues(owner, repo, page, state)
   }, cache_ttl 'repo_issues', function()
     return request({
       path = '/search/issues' .. paged_suffix(page, {
-        'q=' .. lc.url.encode(qualified_query),
+        'q=' .. deck.url.encode(qualified_query),
         'sort=created',
         'order=desc',
       }),
@@ -813,7 +813,7 @@ function M.list_repo_pulls(owner, repo, page, state)
   }, cache_ttl 'repo_pulls', function()
     return request({
       path = '/search/issues' .. paged_suffix(page, {
-        'q=' .. lc.url.encode(qualified_query),
+        'q=' .. deck.url.encode(qualified_query),
         'sort=created',
         'order=desc',
       }),

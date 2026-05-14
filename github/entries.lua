@@ -5,12 +5,12 @@ local file = require 'file'
 local M = {}
 
 local function span(text, color)
-  local s = lc.style.span(tostring(text or ''))
+  local s = deck.style.span(tostring(text or ''))
   if color and color ~= '' then s = s:fg(color) end
   return s
 end
 
-local function line(parts) return lc.style.line(parts) end
+local function line(parts) return deck.style.line(parts) end
 
 local function repo_html_url(owner, repo)
   owner = tostring(owner or '')
@@ -41,10 +41,10 @@ local function format_relative_time(value)
   value = tostring(value or '')
   if value == '' then return nil end
 
-  local ok_parse, timestamp = pcall(lc.time.parse, value)
+  local ok_parse, timestamp = pcall(deck.time.parse, value)
   if not ok_parse then return value end
 
-  local ok_format, formatted = pcall(lc.time.format, timestamp, 'relative')
+  local ok_format, formatted = pcall(deck.time.format, timestamp, 'relative')
   if not ok_format then return value end
   return formatted
 end
@@ -263,6 +263,15 @@ local function build_open_keymap(callback, open_desc, browser_desc)
   return keymap
 end
 
+local function add_clone_keymap(entry)
+  local plugin_keymap = config.get().keymap or {}
+  if plugin_keymap.clone and plugin_keymap.clone ~= '' then
+    entry.keymap = entry.keymap or {}
+    entry.keymap[plugin_keymap.clone] = { callback = action.copy_clone_url, desc = 'copy clone url' }
+  end
+  return entry
+end
+
 local function format_repo_stars(value)
   local stars = tonumber(value or 0) or 0
   if stars < 1000 then return tostring(stars) end
@@ -279,7 +288,7 @@ function M.align_repo_entry_columns(items)
     if entry.kind == 'repo' and entry.display then table.insert(lines, entry.display) end
   end
 
-  if #lines > 1 then lc.style.align_columns(lines) end
+  if #lines > 1 then deck.style.align_columns(lines) end
 end
 
 function M.info_entry(key, title, message, color, detail)
@@ -350,7 +359,7 @@ function M.repo_entry(repo, opts)
   local full_name = owner ~= '' and (owner .. '/' .. name) or name
   local lang = language_style(repo.language)
 
-  return {
+  return add_clone_keymap {
     key = key,
     kind = 'repo',
     owner = owner,
@@ -712,7 +721,7 @@ function M.trending_repo_entry(repo)
   local lang = language_style(repo.language)
   local today = tostring(repo.trending_stars_today or '')
 
-  return {
+  return add_clone_keymap {
     key = full_name ~= '' and full_name or name,
     kind = 'repo',
     owner = owner,
