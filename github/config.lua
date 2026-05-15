@@ -38,6 +38,7 @@ local cfg = {
     open_user = 'u',
     open_in_browser = 'o',
     clone = 'c',
+    star = 'S',
   },
 }
 

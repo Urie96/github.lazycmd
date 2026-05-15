@@ -1178,7 +1178,7 @@ local function list_starred(path, cb)
         for _, item in ipairs(payload.items or {}) do
           local owner = item.owner and item.owner.login or ''
           local repo_name = item.name or ''
-          table.insert(mapped, entries.repo_entry(item, { key = encode_repo_ref(owner, repo_name) }))
+          table.insert(mapped, entries.repo_entry(item, { key = encode_repo_ref(owner, repo_name), starred = true }))
         end
         done(mapped, payload.has_next == true, nil)
       end, function(err)

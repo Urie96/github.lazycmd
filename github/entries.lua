@@ -312,6 +312,13 @@ function M.repo_entry(repo, opts)
   local key = opts.key or name
   local full_name = owner ~= '' and (owner .. '/' .. name) or name
   local lang = language.style(repo.language)
+  local plugin_keymap = config.get().keymap or {}
+  local keymap = build_open_keymap(action.go_to_repo, 'open repository', 'open in browser')
+  if plugin_keymap.star and plugin_keymap.star ~= '' then
+    local star_callback = opts.starred == true and action.unstar_repo or action.star_repo
+    local star_desc = opts.starred == true and 'unstar repository' or 'star repository'
+    keymap[plugin_keymap.star] = { callback = star_callback, desc = star_desc }
+  end
 
   return add_clone_keymap {
     key = key,
@@ -328,7 +335,7 @@ function M.repo_entry(repo, opts)
       span('   ', '#f1e05a'),
       span(format_repo_stars(repo.stargazers_count), '#f1e05a'),
     },
-    keymap = build_open_keymap(action.go_to_repo, 'open repository', 'open in browser'),
+    keymap = keymap,
     preview = action.repo_preview,
   }
 end

@@ -335,6 +335,50 @@ function M.list_starred(page)
   end)
 end
 
+function M.star_repo(owner, repo)
+  owner = trim(owner)
+  repo = trim(repo)
+  if owner == '' or repo == '' then return Promise.reject('Repository path is required') end
+
+  return request({
+    path = '/user/starred/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo),
+    method = 'PUT',
+    auth_required = true,
+    headers = {
+      ['Content-Length'] = '0',
+    },
+    raw = true,
+  }):next(function()
+    local key = owner .. '/' .. repo
+    if session.repos[key] then
+      session.repos[key].viewer_starred = true
+      session.repos[key].stargazers_count = (tonumber(session.repos[key].stargazers_count or 0) or 0) + 1
+    end
+    return true
+  end)
+end
+
+function M.unstar_repo(owner, repo)
+  owner = trim(owner)
+  repo = trim(repo)
+  if owner == '' or repo == '' then return Promise.reject('Repository path is required') end
+
+  return request({
+    path = '/user/starred/' .. encode_path_segment(owner) .. '/' .. encode_path_segment(repo),
+    method = 'DELETE',
+    auth_required = true,
+    raw = true,
+  }):next(function()
+    local key = owner .. '/' .. repo
+    if session.repos[key] then
+      session.repos[key].viewer_starred = false
+      local current = tonumber(session.repos[key].stargazers_count or 0) or 0
+      session.repos[key].stargazers_count = math.max(current - 1, 0)
+    end
+    return true
+  end)
+end
+
 function M.list_gists(page)
   return remember(cache_key { 'gists', tostring(page or 1), tostring(config.get().per_page) }, cache_ttl 'gists', function()
     return request({

@@ -331,13 +331,19 @@ function M.open_in_browser(entry)
   deck.system.open(url)
 end
 
-function M.copy_clone_url(entry)
+local function resolve_repo_entry(entry)
   entry = entry or hovered_entry()
   local owner = entry and (entry.owner or (entry.repo and entry.repo.owner and entry.repo.owner.login))
   local repo = entry and (entry.repo_name or (entry.repo and entry.repo.name))
 
-  if not has_value(owner) or not has_value(repo) then
-    deck.notify 'Repository information is unavailable'
+  if not has_value(owner) or not has_value(repo) then return nil, nil, 'Repository information is unavailable' end
+  return tostring(owner), tostring(repo), nil, entry
+end
+
+function M.copy_clone_url(entry)
+  local owner, repo, err = resolve_repo_entry(entry)
+  if err then
+    deck.notify(err)
     return
   end
 
@@ -370,6 +376,48 @@ function M.copy_clone_url(entry)
     end
 
     deck.notify 'Copied to clipboard'
+  end)
+end
+
+function M.star_repo(entry)
+  local owner, repo, err = resolve_repo_entry(entry)
+  if err then
+    deck.notify(err)
+    return
+  end
+
+  if not api.is_authenticated() then
+    deck.notify 'GitHub token not configured'
+    return
+  end
+
+  deck.notify('Starring ' .. owner .. '/' .. repo .. '...')
+  api.star_repo(owner, repo):next(function()
+    deck.notify('Starred ' .. owner .. '/' .. repo)
+    deck.cmd 'reload'
+  end, function(star_err)
+    deck.notify('Failed to star repository: ' .. tostring(star_err))
+  end)
+end
+
+function M.unstar_repo(entry)
+  local owner, repo, err = resolve_repo_entry(entry)
+  if err then
+    deck.notify(err)
+    return
+  end
+
+  if not api.is_authenticated() then
+    deck.notify 'GitHub token not configured'
+    return
+  end
+
+  deck.notify('Unstarring ' .. owner .. '/' .. repo .. '...')
+  api.unstar_repo(owner, repo):next(function()
+    deck.notify('Unstarred ' .. owner .. '/' .. repo)
+    deck.cmd 'reload'
+  end, function(unstar_err)
+    deck.notify('Failed to unstar repository: ' .. tostring(unstar_err))
   end)
 end
 
