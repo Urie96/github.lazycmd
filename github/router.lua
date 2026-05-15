@@ -293,6 +293,10 @@ local function list_root(_, cb)
       label = 'Starred',
       icon = '',
     }),
+    entries.route_entry('gists', 'Your GitHub gists', authed and 'Current user gists, paginated.' or 'Requires token.', 'yellow', {
+      label = 'Gists',
+      icon = '󰓝',
+    }),
     entries.route_entry('search', 'Search repositories and users', 'Public API, paginated.', 'blue', {
       label = 'Search',
       icon = '󰍉',
@@ -1187,6 +1191,125 @@ local function list_starred(path, cb)
   })
 end
 
+local function list_gists(path, cb)
+  if not api.is_authenticated() then
+    cb {
+      entries.info_entry(
+        'auth',
+        'Token required',
+        'Gists require a GitHub token.',
+        'yellow',
+        "Pass token in require('github').setup { token = ... }."
+      ),
+    }
+    return
+  end
+
+  list_paginated(path, cb, {
+    fetch_page = function(page, done)
+      api.list_gists(page):next(function(payload)
+        local mapped = {}
+        for _, item in ipairs(payload.items or {}) do
+          table.insert(mapped, entries.gist_entry(item))
+        end
+        done(mapped, payload.has_next == true, nil)
+      end, function(err)
+        done(nil, nil, err)
+      end)
+    end,
+    empty_entry = function()
+      return entries.info_entry('empty', 'No gists', 'GitHub returned an empty gist list.', 'darkgray')
+    end,
+  })
+end
+
+local function sorted_gist_files(gist)
+  local out = {}
+  for filename, file_item in pairs((gist or {}).files or {}) do
+    file_item.filename = file_item.filename or filename
+    table.insert(out, file_item)
+  end
+  table.sort(out, function(a, b) return tostring(a.filename or '') < tostring(b.filename or '') end)
+  return out
+end
+
+local function list_gist_files(path, cb)
+  local id = tostring(path[3] or '')
+  cb {
+    entries.info_entry('loading', 'Loading gist', 'Fetching gist files...', 'cyan'),
+  }
+
+  api.get_gist(id):next(function(gist)
+    local mapped = {}
+    for _, file_item in ipairs(sorted_gist_files(gist)) do
+      table.insert(mapped, entries.gist_file_entry(gist, file_item))
+    end
+
+    if #mapped == 0 then
+      mapped = {
+        entries.info_entry('empty', 'No files', 'This gist does not contain files.', 'darkgray'),
+      }
+    end
+
+    if current_path_equals(path) then deck.api.set_entries(nil, mapped) end
+  end, function(err)
+    if current_path_equals(path) then
+      deck.api.set_entries(nil, {
+        entries.info_entry('error', 'GitHub request failed', err, 'red'),
+      })
+    end
+  end)
+end
+
+local function list_gist_file(path, cb)
+  local id = tostring(path[3] or '')
+  local filename = tostring(path[4] or '')
+  cb {
+    entries.info_entry('loading', 'Loading gist file', 'Fetching file content...', 'cyan'),
+  }
+
+  api.get_gist(id):next(function(gist)
+    local file_item = ((gist or {}).files or {})[filename]
+    if not file_item then
+      if current_path_equals(path) then
+        deck.api.set_entries(nil, {
+          entries.info_entry('missing', 'File not found', filename, 'red'),
+        })
+      end
+      return
+    end
+
+    file_item.filename = file_item.filename or filename
+    local entry = entries.gist_file_entry(gist, file_item)
+    if current_path_equals(path) then deck.api.set_entries(nil, { entry }) end
+  end, function(err)
+    if current_path_equals(path) then
+      deck.api.set_entries(nil, {
+        entries.info_entry('error', 'GitHub request failed', err, 'red'),
+      })
+    end
+  end)
+end
+
+local function list_gists_dispatch(path, cb)
+  if #path == 2 then
+    list_gists(path, cb)
+    return
+  end
+
+  if #path == 3 then
+    list_gist_files(path, cb)
+    return
+  end
+
+  if #path == 4 then
+    list_gist_file(path, cb)
+    return
+  end
+
+  cb {}
+end
+
 local function list_search_root(_, cb)
   cb {
     entries.search_prompt_entry 'repo',
@@ -1419,6 +1542,11 @@ function M.list(path, cb)
 
   if route == 'starred' then
     list_starred(path, cb)
+    return
+  end
+
+  if route == 'gists' then
+    list_gists_dispatch(path, cb)
     return
   end
 

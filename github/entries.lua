@@ -1,6 +1,6 @@
 local action = require 'github.action'
 local config = require 'github.config'
-local file = require 'file'
+local language = require 'github.language'
 
 local M = {}
 
@@ -47,6 +47,24 @@ local function format_relative_time(value)
   local ok_format, formatted = pcall(deck.time.format, timestamp, 'relative')
   if not ok_format then return value end
   return formatted
+end
+
+local function format_size(bytes)
+  local value = tonumber(bytes)
+  if not value or value < 0 then return nil end
+  if value < 1024 then return string.format('%dB', value) end
+
+  local units = { 'K', 'M', 'G', 'T', 'P' }
+  value = value / 1024
+  for i, unit in ipairs(units) do
+    if value < 1024 or i == #units then
+      if value >= 10 then
+        return string.format('%.0f%s', value, unit)
+      end
+      return string.format('%.1f%s', value, unit)
+    end
+    value = value / 1024
+  end
 end
 
 local function first_body_summary(body)
@@ -183,71 +201,7 @@ local function notification_type_style(kind)
   return map[tostring(kind or '')] or { icon = '󰧞', color = 'darkgray', label = tostring(kind or 'Notice') }
 end
 
-local function language_style(language)
-  local name = tostring(language or '')
-  local language_to_filename = {
-    Rust = 'main.rs',
-    Lua = 'init.lua',
-    Go = 'main.go',
-    Python = 'main.py',
-    JavaScript = 'index.js',
-    TypeScript = 'index.ts',
-    TSX = 'index.tsx',
-    JSX = 'index.jsx',
-    Shell = 'script.sh',
-    Bash = 'script.sh',
-    Zig = 'main.zig',
-    Nix = 'default.nix',
-    C = 'main.c',
-    ['C++'] = 'main.cpp',
-    ['C#'] = 'main.cs',
-    ['F#'] = 'main.fs',
-    Java = 'Main.java',
-    Kotlin = 'Main.kt',
-    Swift = 'main.swift',
-    PHP = 'index.php',
-    Ruby = 'main.rb',
-    Haskell = 'main.hs',
-    Elixir = 'main.ex',
-    Erlang = 'main.erl',
-    OCaml = 'main.ml',
-    Dart = 'main.dart',
-    R = 'main.r',
-    Scala = 'Main.scala',
-    Perl = 'main.pl',
-    ['Vim Script'] = 'plugin.vim',
-    Clojure = 'core.clj',
-    HCL = 'main.tf',
-    Astro = 'index.astro',
-    HTML = 'index.html',
-    CSS = 'style.css',
-    SCSS = 'style.scss',
-    Vue = 'App.vue',
-    Svelte = 'App.svelte',
-    Dockerfile = 'Dockerfile',
-    Makefile = 'Makefile',
-    Markdown = 'README.md',
-    JSON = 'package.json',
-    YAML = 'config.yaml',
-    Toml = 'Cargo.toml',
-  }
 
-  local sample = language_to_filename[name]
-  if sample and sample ~= '' then
-    local icon, color = file.get_icon(sample)
-    if icon and icon ~= '' then return { icon = icon, color = color or 'darkgray' } end
-  end
-
-  return { icon = '󰈔', color = 'darkgray' }
-end
-
-local function file_style_from_name(name)
-  local icon, color = file.get_icon(name)
-  return {
-    icon = icon or '󰈔',
-    color = color or 'white',
-  }
-end
 
 local function build_open_keymap(callback, open_desc, browser_desc)
   local plugin_keymap = config.get().keymap or {}
@@ -357,7 +311,7 @@ function M.repo_entry(repo, opts)
   local name = repo.name or ''
   local key = opts.key or name
   local full_name = owner ~= '' and (owner .. '/' .. name) or name
-  local lang = language_style(repo.language)
+  local lang = language.style(repo.language)
 
   return add_clone_keymap {
     key = key,
@@ -422,6 +376,66 @@ function M.notification_entry(notification, encode_repo_ref)
     },
     keymap = build_open_keymap(open_callback, open_desc, 'open in browser'),
     preview = action.notification_preview,
+  }
+end
+
+function M.gist_entry(gist)
+  local id = tostring(gist.id or '')
+  local description = tostring(gist.description or '')
+  if description == '' then description = '<no description>' end
+  local visibility = gist.public == true and 'public' or 'secret'
+  local color = gist.public == true and 'cyan' or 'yellow'
+  local updated = format_relative_time(gist.updated_at) or format_relative_time(gist.created_at) or ''
+  local path = { 'github', 'gists', id }
+
+  return {
+    key = id,
+    kind = 'gist',
+    gist = gist,
+    gist_id = id,
+    html_url = gist.html_url,
+    web_url = gist.html_url,
+    display = line {
+      span('󰓝 ', color),
+      span(excerpt(description, 72), 'white'),
+      span('  ' .. visibility, color),
+      updated ~= '' and span('  ' .. updated, 'darkgray') or '',
+    },
+    keymap = build_open_keymap(function() action.go_to_path(path) end, 'open gist files', 'open gist in browser'),
+    preview = action.gist_preview,
+  }
+end
+
+function M.gist_file_entry(gist, file_item)
+  local id = tostring(gist.id or '')
+  local filename = tostring(file_item.filename or '')
+  local lang = language.style(file_item.language)
+  local size = format_size(file_item.size)
+  local path = { 'github', 'gists', id, filename }
+  local plugin_keymap = config.get().keymap or {}
+  local keymap = build_open_keymap(action.open_gist_file_in_editor, 'edit file', 'open gist in browser')
+  if plugin_keymap.open and plugin_keymap.open ~= plugin_keymap.enter then
+    keymap[plugin_keymap.open] = { callback = function() action.go_to_path(path) end, desc = 'open file page' }
+  end
+
+  return {
+    key = filename,
+    kind = 'gist_file',
+    gist = gist,
+    file = file_item,
+    gist_id = id,
+    filename = filename,
+    html_url = gist.html_url,
+    web_url = gist.html_url,
+    raw_url = file_item.raw_url,
+    display = line {
+      span(lang.icon, lang.color),
+      span(' ' .. filename, 'white'),
+      file_item.language and span('  ' .. tostring(file_item.language), 'blue') or '',
+      size and span('  ' .. size, 'darkgray') or '',
+    },
+    keymap = keymap,
+    preview = action.gist_file_preview,
   }
 end
 
@@ -718,7 +732,7 @@ function M.trending_repo_entry(repo)
   local owner = ((repo or {}).owner or {}).login or ''
   local name = repo.name or ''
   local full_name = repo.full_name or (owner ~= '' and name ~= '' and (owner .. '/' .. name) or name)
-  local lang = language_style(repo.language)
+  local lang = language.style(repo.language)
   local today = tostring(repo.trending_stars_today or '')
 
   return add_clone_keymap {

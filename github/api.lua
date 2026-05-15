@@ -13,6 +13,8 @@ local session = {
   issues = {},
   pulls = {},
   discussions = {},
+  gists = {},
+  gist_raw = {},
   readmes = {},
   languages = {},
   contents = {},
@@ -197,6 +199,8 @@ function M.reset()
   session.issues = {}
   session.pulls = {}
   session.discussions = {}
+  session.gists = {}
+  session.gist_raw = {}
   session.readmes = {}
   session.languages = {}
   session.contents = {}
@@ -328,6 +332,107 @@ function M.list_starred(page)
         has_next = has_next_page(payload.response and payload.response.headers),
       }
     end)
+  end)
+end
+
+function M.list_gists(page)
+  return remember(cache_key { 'gists', tostring(page or 1), tostring(config.get().per_page) }, cache_ttl 'gists', function()
+    return request({
+      path = '/gists' .. paged_suffix(page),
+      auth_required = true,
+    }):next(function(payload)
+      return {
+        items = payload.data or {},
+        has_next = has_next_page(payload.response and payload.response.headers),
+      }
+    end)
+  end):next(function(payload)
+    for _, gist in ipairs(payload.items or {}) do
+      if gist and gist.id then session.gists[tostring(gist.id)] = gist end
+    end
+    return payload
+  end)
+end
+
+function M.get_gist(id)
+  id = trim(id)
+  if id == '' then return Promise.reject('Gist id is required') end
+  if session.gists[id] and session.gists[id].files then return Promise.resolve(session.gists[id]) end
+
+  return remember(cache_key { 'gist', id }, cache_ttl 'gist', function()
+    return request({
+      path = '/gists/' .. encode_path_segment(id),
+      auth_required = true,
+    }):next(function(payload) return payload.data end)
+  end):next(function(data)
+    session.gists[id] = data
+    return data
+  end)
+end
+
+function M.get_gist_file_content(id, filename)
+  id = trim(id)
+  filename = tostring(filename or '')
+  if id == '' then return Promise.reject('Gist id is required') end
+  if filename == '' then return Promise.reject('Gist filename is required') end
+
+  local cache_id = cache_key { 'gist_raw', id, filename }
+  if session.gist_raw[cache_id] ~= nil then return Promise.resolve(session.gist_raw[cache_id]) end
+
+  return M.get_gist(id):next(function(gist)
+    local file = ((gist or {}).files or {})[filename]
+    if not file then return Promise.reject('Gist file not found: ' .. filename) end
+
+    local content = file.content
+    if type(content) == 'string' then
+      session.gist_raw[cache_id] = content
+      cache_set(cache_id, content, cache_ttl 'gist_raw')
+      return content
+    end
+
+    local raw_url = tostring(file.raw_url or '')
+    if raw_url == '' then return Promise.reject('Gist file content is unavailable') end
+
+    return remember(cache_id, cache_ttl 'gist_raw', function()
+      return request({
+        url = raw_url,
+        raw = true,
+        include_token = true,
+      }):next(function(payload) return payload.data or '' end)
+    end):next(function(raw)
+      session.gist_raw[cache_id] = raw
+      return raw
+    end)
+  end)
+end
+
+function M.update_gist_file(id, filename, content)
+  id = trim(id)
+  filename = tostring(filename or '')
+  if id == '' then return Promise.reject('Gist id is required') end
+  if filename == '' then return Promise.reject('Gist filename is required') end
+
+  local files = {}
+  files[filename] = { content = tostring(content or '') }
+
+  return request({
+    path = '/gists/' .. encode_path_segment(id),
+    method = 'PATCH',
+    auth_required = true,
+    headers = {
+      ['Content-Type'] = 'application/json',
+    },
+    body = deck.json.encode({ files = files }),
+  }):next(function(payload)
+    local gist = payload.data or {}
+    session.gists[id] = gist
+    cache_set(cache_key { 'gist', id }, gist, cache_ttl 'gist')
+
+    local raw_cache_id = cache_key { 'gist_raw', id, filename }
+    session.gist_raw[raw_cache_id] = tostring(content or '')
+    cache_set(raw_cache_id, tostring(content or ''), cache_ttl 'gist_raw')
+
+    return gist
   end)
 end
 

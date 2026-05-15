@@ -1,5 +1,6 @@
 local api = require 'github.api'
 local config = require 'github.config'
+local language = require 'github.language'
 
 local M = {}
 
@@ -185,11 +186,6 @@ local function trim_code_for_preview(content)
   return content, truncated
 end
 
-local function detect_language_from_name(name)
-  name = tostring(name or ''):lower()
-  if name == 'dockerfile' then return 'dockerfile' end
-  return name:match '%.([^.]+)$'
-end
 
 function M.open_user_input()
   deck.input {
@@ -409,6 +405,62 @@ function M.open_file_in_editor(entry)
   end)
 end
 
+function M.open_gist_file_in_editor(entry)
+  entry = entry or hovered_entry()
+  if not entry or entry.kind ~= 'gist_file' then
+    deck.notify 'No gist file selected'
+    return
+  end
+
+  local filename = tostring(entry.filename or entry.key or '')
+  local gist_id = tostring(entry.gist_id or '')
+  if gist_id == '' or filename == '' then
+    deck.notify 'Gist file information is unavailable'
+    return
+  end
+
+  deck.notify 'Downloading gist file...'
+  api.get_gist_file_content(gist_id, filename):next(function(original)
+    original = tostring(original or '')
+    deck.system.edit({ content = original, ext = filename }, function(edited, edit_err)
+      if edit_err then
+        deck.notify('Error: Failed to read edited content ' .. tostring(edit_err or ''))
+        return
+      end
+      if edited == nil then
+        deck.notify 'Failed to read edited content'
+        return
+      end
+      if edited == original then
+        deck.notify 'No changes made'
+        return
+      end
+
+      deck.confirm {
+        title = 'Update gist file',
+        prompt = 'Push changes to ' .. filename .. '?',
+        on_confirm = function()
+          deck.notify 'Pushing gist file...'
+          api.update_gist_file(gist_id, filename, edited):next(function(gist)
+            entry.gist = gist or entry.gist
+            entry.file = ((gist or {}).files or {})[filename] or entry.file
+            if entry.file then entry.file.content = edited end
+            deck.notify 'Gist file updated'
+            deck.cmd 'reload'
+          end, function(update_err)
+            deck.notify('Failed to update gist file: ' .. tostring(update_err))
+          end)
+        end,
+        on_cancel = function()
+          deck.notify 'Gist changes discarded'
+        end,
+      }
+    end)
+  end, function(fetch_err)
+    deck.notify('Failed to fetch gist file: ' .. tostring(fetch_err))
+  end)
+end
+
 function M.go_to_path(path)
   if type(path) ~= 'table' or #path == 0 then return end
   deck.api.go_to(path)
@@ -572,6 +624,80 @@ function M.load_more_preview(entry)
   return info_lines('Load more...', 'Fetch the next page from GitHub for this list.', '', 'yellow')
 end
 
+function M.gist_preview(entry)
+  local gist = entry.gist or {}
+  local files = gist.files or {}
+  local file_lines = {}
+  local count = 0
+
+  for filename, file_item in pairs(files) do
+    count = count + 1
+    table.insert(file_lines, line {
+      span('- ', 'darkgray'),
+      span(filename, 'white'),
+      file_item.language and span('  ' .. tostring(file_item.language), 'blue') or '',
+      file_item.size and span('  ' .. (format_size(file_item.size) or tostring(file_item.size) .. 'B'), 'darkgray') or '',
+    })
+  end
+
+  table.sort(file_lines, function(a, b) return tostring(a) < tostring(b) end)
+
+  local header = build_aligned_preview_header({
+    kv('ID', gist.id or entry.gist_id, 'yellow'),
+    kv('Visibility', gist.public == true and 'public' or 'secret', gist.public == true and 'cyan' or 'yellow'),
+    kv('Files', tostring(count), 'blue'),
+    kv('Created', format_datetime(gist.created_at), 'white'),
+    kv('Updated', format_datetime(gist.updated_at), 'white'),
+    kv('URL', gist.html_url, 'darkgray'),
+  }, gist.description ~= '' and gist.description or 'Gist')
+
+  local lines = { header, '' }
+  if count == 0 then
+    table.insert(lines, line { span('No files', 'darkgray') })
+  else
+    table.insert(lines, line { span('Files:', 'cyan') })
+    deck.list_extend(lines, file_lines)
+  end
+
+  return text(lines)
+end
+
+function M.gist_file_preview(entry, cb)
+  entry = entry or hovered_entry()
+  local file_item = entry.file or {}
+  local filename = tostring(entry.filename or file_item.filename or entry.key or '')
+  local syntax = language.syntax(filename)
+
+  local function render(content)
+    local clipped, truncated = trim_code_for_preview(content or '')
+    local rendered = deck.style.highlight(clipped, syntax)
+    if truncated then
+      rendered:append ''
+      rendered:append(line { span('[truncated]', 'yellow') })
+    end
+    return rendered
+  end
+
+  if type(file_item.content) == 'string' then
+    local preview = render(file_item.content)
+    if cb then
+      cb(preview)
+      return
+    end
+    return preview
+  end
+
+  if cb then cb(info_lines('Gist file', 'Loading file content from GitHub...', '', 'cyan')) end
+  api.get_gist_file_content(entry.gist_id, filename):next(function(content)
+    file_item.content = content or ''
+    if cb then cb(render(file_item.content)) end
+  end, function(err)
+    if cb then cb(info_lines('Gist file', err, '', 'red')) end
+  end)
+
+  if not cb then return info_lines('Gist file', 'Loading file content from GitHub...', '', 'cyan') end
+end
+
 function M.readme_preview(entry, cb)
   entry = entry or hovered_entry()
   if not entry or entry.kind ~= 'readme' or not entry.owner or not entry.repo_name then
@@ -639,8 +765,8 @@ function M.repo_content_preview(entry, cb)
 
   local function render_file(content)
     local clipped, truncated = trim_code_for_preview(content or '')
-    local language = detect_language_from_name(item.name or entry.item_path) or 'text'
-    local rendered = deck.style.highlight(clipped, language)
+    local syntax = language.syntax(item.name or entry.item_path)
+    local rendered = deck.style.highlight(clipped, syntax)
     if truncated then
       rendered:append ''
       rendered:append(line { span('[truncated]', 'yellow') })
